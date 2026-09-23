@@ -22,5 +22,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
       - name: Apply exact increment 8 patch
         run: python tools/apply_increment8.py
+      - name: Rebuild commit without ci workflow
+        run: |
+          git reset --soft HEAD^
+          git restore --staged .github/workflows/ci.yml
+          git commit -m "test(policy): wire runtime signals (increment 8)"
       - name: Push patch commit
         run: git push origin HEAD:increment8-runtime-policy
