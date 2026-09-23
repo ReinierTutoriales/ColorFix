@@ -1238,7 +1238,24 @@ int main(int argc, char** argv) {
     DWORD origSize = sizeof(origLight);
     const LSTATUS origStatus = RegGetValueW(HKEY_CURRENT_USER, kPersonalize, L"AppsUseLightTheme",
                                             RRF_RT_REG_DWORD, nullptr, &origLight, &origSize);
+    auto printHookLive = [](const char* tag) {
+        const Counts a = Snapshot();
+        const COLORREF sys = GetSysColor(COLOR_WINDOW);
+        HBRUSH brush = CreateSolidBrush(kWhite);
+        const COLORREF made = BrushColor(brush);
+        DeleteObject(brush);
+        const Counts b = Snapshot();
+        std::printf("runtime-detail: hook-live-%s active=%d sys=", tag, cfp::Active() ? 1 : 0);
+        PrintRgb(sys);
+        std::printf(" brush=");
+        PrintRgb(made);
+        std::printf(" calls GetSysColor=%ld CreateSolidBrush=%ld\n",
+                    Delta(a, b, HookId::GetSysColor),
+                    Delta(a, b, HookId::CreateSolidBrush));
+    };
+    printHookLive("pre-listener");
     const bool listenerOk = cfr::StartListener(cfp::Mode::FollowSystem);
+    printHookLive("post-listener");
     if (!listenerOk) infraOk = false;
     std::printf("runtime: listener %s\n", listenerOk ? "STARTED" : "INFRASTRUCTURE_FAILURE");
 
