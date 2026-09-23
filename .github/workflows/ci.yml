@@ -56,8 +56,17 @@ jobs:
           Add-Content $env:GITHUB_STEP_SUMMARY '```text'
           $out | Add-Content $env:GITHUB_STEP_SUMMARY
           Add-Content $env:GITHUB_STEP_SUMMARY '```'
-          $key = $out | Select-String '^(arch|threshold|expect|autotest|detail|surface|scenario|policy|summary):' | ForEach-Object { $_.Line }
-          Write-Output "::notice title=probe-hooks ${{ matrix.preset }}::$(($key -join '%0A'))"
+          # Annotations are truncated at about 4 KB: publish the verdict first,
+          # then autotests and surfaces as separate notices.
+          $groups = [ordered]@{
+            'result'    = '^(arch|summary|policy):'
+            'autotests' = '^(threshold|expect|autotest|detail):'
+            'surfaces'  = '^(surface|scenario):'
+          }
+          foreach ($g in $groups.GetEnumerator()) {
+            $lines = $out | Select-String $g.Value | ForEach-Object { $_.Line }
+            Write-Output "::notice title=probe-hooks ${{ matrix.preset }} $($g.Key)::$(($lines -join '%0A'))"
+          }
           exit $code
       - name: Generate Windhawk mod
         run: python windhawk/generate_mod.py
