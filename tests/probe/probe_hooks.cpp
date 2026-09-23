@@ -47,12 +47,18 @@ constexpr unsigned kDarkThreshold = 128;  // reported luma class threshold
 // Brushes created before any hook is enabled: immune to mapping and counters.
 HBRUSH g_magenta = nullptr;
 HBRUSH g_green = nullptr;
+constexpr COLORREF kOrange = RGB(200, 100, 0);  // luma 113: untouched by the mapper
+HBRUSH g_orange = nullptr;
+constexpr int kStaticId = 101, kEditId = 102, kButtonId = 103, kCustomStaticId = 104;
 
-enum class Surface { LiteralBrush, BkColor, SysColorBrush, StockWhite, Magenta, ClassBg };
+enum class Surface {
+    LiteralBrush, BkColor, SysColorBrush, StockWhite, Magenta, ClassBg,
+    CtlStatic, CtlEdit, CtlButton, CtlCustom
+};
 
 struct SurfaceDef {
     const char* name;
-    char window;  // 'E' or 'K'
+    char window;  // 'E', 'K' or 'C'
     RECT rect;
     Surface kind;
 };
@@ -67,6 +73,13 @@ constexpr SurfaceDef kSurfaces[] = {
     {"E.magenta-ctl",    'E', kMagentaRect,        Surface::Magenta},
     {"K.class-bg",       'K', {10, 10, 300, 90},   Surface::ClassBg},
     {"K.magenta-ctl",    'K', kMagentaRect,        Surface::Magenta},
+    // C: USER32 child controls without manifest. Rects are inset 8 px from
+    // each 90x80 control to stay clear of borders and 3D edges.
+    {"C.static-default", 'C', {18, 18, 92, 82},    Surface::CtlStatic},
+    {"C.edit-default",   'C', {118, 18, 192, 82},  Surface::CtlEdit},
+    {"C.button-face",    'C', {218, 18, 292, 82},  Surface::CtlButton},
+    {"C.static-custom",  'C', {18, 118, 92, 182},  Surface::CtlCustom},
+    {"C.magenta-ctl",    'C', kMagentaRect,        Surface::Magenta},
 };
 
 void PaintExplicit(HDC dc) {
@@ -95,6 +108,10 @@ void PaintExplicit(HDC dc) {
             FillRect(dc, &s.rect, g_magenta);
             break;
         case Surface::ClassBg:
+        case Surface::CtlStatic:
+        case Surface::CtlEdit:
+        case Surface::CtlButton:
+        case Surface::CtlCustom:
             break;
         }
     }
@@ -105,20 +122,30 @@ void PaintClass(HDC dc) {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    const bool isK = GetWindowLongPtrW(hwnd, GWLP_USERDATA) == 'K';
+    const LONG_PTR tag = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    const bool explicitPaint = tag != 'K' && tag != 'C';
     switch (msg) {
     case WM_ERASEBKGND:
-        if (!isK) return 1;  // E paints its full client area itself
-        break;               // K: DefWindowProc erases with the class brush
+        if (explicitPaint) return 1;  // E paints its full client area itself
+        break;                        // K, C: DefWindowProc erases with the class brush
+    case WM_CTLCOLORSTATIC:
+        // C: the custom static keeps an application-chosen color. The parent
+        // answers itself, so ColorFix must neither see nor alter this reply.
+        if (tag == 'C' && GetDlgCtrlID(reinterpret_cast<HWND>(lp)) == kCustomStaticId) {
+            SetBkColor(reinterpret_cast<HDC>(wp), kOrange);
+            return reinterpret_cast<LRESULT>(g_orange);
+        }
+        break;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
-        isK ? PaintClass(dc) : PaintExplicit(dc);
+        explicitPaint ? PaintExplicit(dc) : PaintClass(dc);
         EndPaint(hwnd, &ps);
         return 0;
     }
     case WM_PRINTCLIENT:
-        isK ? PaintClass(reinterpret_cast<HDC>(wp)) : PaintExplicit(reinterpret_cast<HDC>(wp));
+        explicitPaint ? PaintExplicit(reinterpret_cast<HDC>(wp))
+                      : PaintClass(reinterpret_cast<HDC>(wp));
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -206,6 +233,7 @@ void Pump(DWORD ms) {
 constexpr const char* kHookNames[] = {
     "GetSysColor", "GetSysColorBrush", "GetStockObject", "SetTextColor",
     "SetBkColor", "CreateSolidBrush", "DeleteObject", "DefWindowProcErase",
+    "DefWindowProcCtlColor",
 };
 constexpr int kHookCount = static_cast<int>(HookId::Count);
 
@@ -252,6 +280,7 @@ struct Autotest {
     long delta;
     bool valueOk;
     COLORREF expected, observed;
+    bool expectNoCall = false;  // the hook must NOT see this call
 };
 
 void PrintRgb(COLORREF c) {
@@ -273,12 +302,23 @@ bool RegisterWithMinHook(HMODULE module, const char* name, void* hook, void** or
     return true;
 }
 
-HWND MakeWindow(const wchar_t* cls, char tag, int y) {
+HWND MakeWindow(const wchar_t* cls, char tag, int y, int x = 100) {
     HWND h = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, cls, L"ColorFixProbe",
-                             WS_POPUP, 100, y, kWidth, kHeight, nullptr, nullptr,
+                             WS_POPUP, x, y, kWidth, kHeight, nullptr, nullptr,
                              GetModuleHandleW(nullptr), nullptr);
     if (h) {
         SetWindowLongPtrW(h, GWLP_USERDATA, tag);
+        if (tag == 'C') {
+            auto child = [&](const wchar_t* cls, DWORD style, int x, int y, int id) {
+                CreateWindowExW(0, cls, L"", WS_CHILD | WS_VISIBLE | style, x, y, 90, 80, h,
+                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                GetModuleHandleW(nullptr), nullptr);
+            };
+            child(L"STATIC", 0, 10, 10, kStaticId);
+            child(L"EDIT", WS_BORDER, 110, 10, kEditId);
+            child(L"BUTTON", BS_PUSHBUTTON, 210, 10, kButtonId);
+            child(L"STATIC", 0, 10, 110, kCustomStaticId);
+        }
         ShowWindow(h, SW_SHOWNOACTIVATE);
         UpdateWindow(h);
     }
@@ -289,7 +329,7 @@ HWND MakeWindow(const wchar_t* cls, char tag, int y) {
 
 int main() {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    std::printf("ColorFixProbe increment 2 - Phase 1 + 1b hooks, no Common Controls\n");
+    std::printf("ColorFixProbe increment 3 - Phase 1 + 1b hooks + WM_CTLCOLOR, no Common Controls\n");
 #if defined(_M_ARM64)
     std::printf("arch: ARM64\n");
 #elif defined(_M_X64) || defined(__x86_64__)
@@ -301,6 +341,7 @@ int main() {
 
     g_magenta = CreateSolidBrush(kMagenta);
     g_green = CreateSolidBrush(kGreen);
+    g_orange = CreateSolidBrush(kOrange);
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -312,7 +353,8 @@ int main() {
 
     HWND winE = MakeWindow(wc.lpszClassName, 'E', 100);
     HWND winK = MakeWindow(wc.lpszClassName, 'K', 350);
-    if (!winE || !winK) { std::printf("setup: CreateWindowExW failed\n"); return 3; }
+    HWND winC = MakeWindow(wc.lpszClassName, 'C', 100, 450);
+    if (!winE || !winK || !winC) { std::printf("setup: CreateWindowExW failed\n"); return 3; }
     Pump(200);
 
     // Values needed for expectations, read before any hook is enabled.
@@ -320,6 +362,9 @@ int main() {
     const HBRUSH baseSysBrush = GetSysColorBrush(COLOR_WINDOW);
     const COLORREF expWindow = colorfix::MapSystemColor(COLOR_WINDOW, baseSysWindow);
     const COLORREF expLiteral = colorfix::MapLiteralColor(kWhite);
+    const COLORREF exp3dFace = colorfix::MapSystemColor(COLOR_3DFACE, GetSysColor(COLOR_3DFACE));
+    const COLORREF expWindowText =
+        colorfix::MapSystemColor(COLOR_WINDOWTEXT, GetSysColor(COLOR_WINDOWTEXT));
     std::printf("expect: COLOR_WINDOW ");
     PrintRgb(baseSysWindow); std::printf("->"); PrintRgb(expWindow);
     std::printf(", literal white ");
@@ -333,6 +378,7 @@ int main() {
 
     const WindowShot baseE = Shoot(winE);
     const WindowShot baseK = Shoot(winK);
+    const WindowShot baseC = Shoot(winC);
 
     // Control for DeleteObject.pass: the same check with hooks disabled.
     // Oracle: the process GDI object count. GetObjectType still reported
@@ -452,11 +498,68 @@ int main() {
         t.observed = RGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
         t.valueOk = r == 1 && t.observed == t.expected;
     });
+    // WM_CTLCOLOR*: returned brush plus text and background left on the DC.
+    auto rgbHex = [](COLORREF c) {
+        return static_cast<unsigned long>((GetRValue(c) << 16) | (GetGValue(c) << 8) |
+                                          GetBValue(c));
+    };
+    struct CtlCase { const char* name; UINT msg; int childId; COLORREF bg; };
+    const CtlCase ctlCases[] = {
+        {"CtlColor.static",  WM_CTLCOLORSTATIC,  kStaticId, exp3dFace},
+        {"CtlColor.edit",    WM_CTLCOLOREDIT,    kEditId,   expWindow},
+        {"CtlColor.btn",     WM_CTLCOLORBTN,     kButtonId, exp3dFace},
+        {"CtlColor.listbox", WM_CTLCOLORLISTBOX, kEditId,   expWindow},
+        {"CtlColor.dlg",     WM_CTLCOLORDLG,     0,         exp3dFace},
+    };
+    for (const auto& cc : ctlCases) {
+        run(cc.name, HookId::DefWindowProcCtlColor, [&](Autotest& t) {
+            HDC dc = CreateCompatibleDC(nullptr);
+            HWND child = cc.childId ? GetDlgItem(winC, cc.childId) : winC;
+            const LRESULT r = DefWindowProcW(winC, cc.msg, reinterpret_cast<WPARAM>(dc),
+                                             reinterpret_cast<LPARAM>(child));
+            const COLORREF brush = BrushColor(reinterpret_cast<HGDIOBJ>(r));
+            const COLORREF bk = GetBkColor(dc);
+            const COLORREF text = GetTextColor(dc);
+            std::printf("detail: %s brush=%06lX bk=%06lX text=%06lX\n", cc.name,
+                        rgbHex(brush), rgbHex(bk), rgbHex(text));
+            t.expected = cc.bg;
+            t.observed = brush;
+            t.valueOk = brush == cc.bg && bk == cc.bg && text == expWindowText;
+            DeleteDC(dc);
+        });
+    }
+    {
+        // Scrollbar: informational only; its default may be a pattern brush,
+        // which the guard deliberately leaves alone.
+        HDC dc = CreateCompatibleDC(nullptr);
+        const Counts a = Snapshot();
+        const LRESULT r = DefWindowProcW(winC, WM_CTLCOLORSCROLLBAR, reinterpret_cast<WPARAM>(dc),
+                                         reinterpret_cast<LPARAM>(winC));
+        std::printf("detail: CtlColor.scrollbar calls=%ld brush=%06lX (informational)\n",
+                    Delta(a, Snapshot(), HookId::DefWindowProcCtlColor),
+                    rgbHex(BrushColor(reinterpret_cast<HGDIOBJ>(r))));
+        DeleteDC(dc);
+    }
+    {
+        // Application-chosen color: the parent answers WM_CTLCOLORSTATIC itself,
+        // so the hook must not be called and the reply must be preserved.
+        HDC dc = CreateCompatibleDC(nullptr);
+        const Counts a = Snapshot();
+        const LRESULT r = SendMessageW(winC, WM_CTLCOLORSTATIC, reinterpret_cast<WPARAM>(dc),
+                                       reinterpret_cast<LPARAM>(GetDlgItem(winC, kCustomStaticId)));
+        Autotest t{"CtlColor.custom", Delta(a, Snapshot(), HookId::DefWindowProcCtlColor), false,
+                   kOrange, BrushColor(reinterpret_cast<HGDIOBJ>(r))};
+        t.expectNoCall = true;
+        t.valueOk = reinterpret_cast<HBRUSH>(r) == g_orange && GetBkColor(dc) == kOrange;
+        tests.push_back(t);
+        DeleteDC(dc);
+    }
     DeleteDC(testDc);
 
     // Phase C: hooked capture.
     const WindowShot hookE = Shoot(winE);
     const WindowShot hookK = Shoot(winK);
+    const WindowShot hookC = Shoot(winC);
 
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
@@ -467,11 +570,14 @@ int main() {
 
     std::printf("\n[autotest]\n");
     for (const auto& t : tests) {
-        const char* verdict = t.delta == 0 ? "INFRASTRUCTURE_FAILURE"
-                            : t.valueOk     ? "PASS"
-                                            : "HOOK_BEHAVIOR_FAILURE";
-        if (t.delta == 0) infraOk = false;
-        else if (!t.valueOk) behaviorOk = false;
+        const bool infraFail = !t.expectNoCall && t.delta == 0;
+        const bool behaviorFail =
+            !infraFail && (!t.valueOk || (t.expectNoCall && t.delta != 0));
+        const char* verdict = infraFail    ? "INFRASTRUCTURE_FAILURE"
+                            : behaviorFail ? "HOOK_BEHAVIOR_FAILURE"
+                                           : "PASS";
+        if (infraFail) infraOk = false;
+        if (behaviorFail) behaviorOk = false;
         std::printf("autotest: %-16s calls=%ld expected=", t.name, t.delta);
         PrintRgb(t.expected);
         std::printf(" observed=");
@@ -484,13 +590,20 @@ int main() {
     const char* modeName[2] = {"flags0", "full"};
     std::printf("\n[surfaces]\n");
     for (const auto& s : kSurfaces) {
-        const WindowShot& b = s.window == 'E' ? baseE : baseK;
-        const WindowShot& h = s.window == 'E' ? hookE : hookK;
+        const WindowShot& b = s.window == 'E' ? baseE : s.window == 'K' ? baseK : baseC;
+        const WindowShot& h = s.window == 'E' ? hookE : s.window == 'K' ? hookK : hookC;
         const bool control = s.kind == Surface::Magenta;
-        const COLORREF expected = control ? kMagenta
-                                : (s.kind == Surface::LiteralBrush || s.kind == Surface::BkColor)
-                                      ? expLiteral
-                                      : expWindow;
+        const bool custom = s.kind == Surface::CtlCustom;
+        COLORREF expected = expWindow;
+        switch (s.kind) {
+        case Surface::Magenta:      expected = kMagenta; break;
+        case Surface::CtlCustom:    expected = kOrange; break;
+        case Surface::LiteralBrush:
+        case Surface::BkColor:      expected = expLiteral; break;
+        case Surface::CtlStatic:
+        case Surface::CtlButton:    expected = exp3dFace; break;
+        default:                    expected = expWindow; break;
+        }
         std::printf("surface: %-17s", s.name);
         for (int m = 0; m < 2; ++m) {
             COLORREF bc = CLR_INVALID, hc = CLR_INVALID;
@@ -504,11 +617,22 @@ int main() {
                 infraOk = false;
             } else if (!bu || !hu) {
                 verdict = "NONUNIFORM";
-                if (control) infraOk = false;
+                if (control || custom) infraOk = false;
             } else if (control) {
                 const bool ok = bc == kMagenta && hc == kMagenta;
                 verdict = ok ? "VALID" : "INFRASTRUCTURE_FAILURE";
                 if (!ok) infraOk = false;
+            } else if (custom) {
+                // A baseline orange also proves child controls are captured.
+                if (bc != kOrange) {
+                    verdict = "INFRASTRUCTURE_FAILURE";
+                    infraOk = false;
+                } else if (hc == kOrange) {
+                    verdict = "PRESERVED";
+                } else {
+                    verdict = "OVERRIDDEN";
+                    behaviorOk = false;
+                }
             } else if (bc == expected) {
                 verdict = "NOT_APPLICABLE";
             } else if (hc == expected) {
@@ -527,8 +651,8 @@ int main() {
     }
 
     std::printf("\n[scenario counters] hooked repaint+capture, per window\n");
-    for (char w : {'E', 'K'}) {
-        const WindowShot& h = w == 'E' ? hookE : hookK;
+    for (char w : {'E', 'K', 'C'}) {
+        const WindowShot& h = w == 'E' ? hookE : w == 'K' ? hookK : hookC;
         std::printf("scenario: %c", w);
         for (int i = 0; i < kHookCount; ++i) {
             const long d = h.after.v[i] - h.before.v[i];
@@ -548,5 +672,6 @@ int main() {
                 behaviorOk ? "PASS" : "HOOK_BEHAVIOR_FAILURE", code);
     DestroyWindow(winE);
     DestroyWindow(winK);
+    DestroyWindow(winC);
     return code;
 }
