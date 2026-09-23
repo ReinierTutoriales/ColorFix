@@ -1,0 +1,26 @@
+name: compact-uxtheme-report
+
+on:
+  push:
+    branches: [probe-uxtheme-observe]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: python tools/compact_uxtheme_report.py
+      - shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tests/probe/uxtheme_observer.hpp
+          git commit -m 'test(probe): keep UxTheme report bounded'
+          git push origin HEAD:probe-uxtheme-observe
