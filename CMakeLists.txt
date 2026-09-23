@@ -28,6 +28,13 @@ add_executable(colorfix_probe_infra tests/probe/probe_infra.cpp)
 target_compile_definitions(colorfix_probe_infra PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(colorfix_probe_infra PRIVATE user32 gdi32 dwmapi)
 
+add_executable(colorfix_probe_hooks tests/probe/probe_hooks.cpp)
+target_compile_definitions(colorfix_probe_hooks PRIVATE
+  COLORFIX_PROBE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(colorfix_probe_hooks PRIVATE
+  "${PROJECT_SOURCE_DIR}/core" "${PROJECT_SOURCE_DIR}/hooks")
+target_link_libraries(colorfix_probe_hooks PRIVATE minhook_detours user32 gdi32 dwmapi)
+
 add_library(colorfix_core_check OBJECT tests/core_check.cpp)
 target_include_directories(colorfix_core_check PRIVATE "${PROJECT_SOURCE_DIR}/core")
 
