@@ -56,7 +56,7 @@ jobs:
           Add-Content $env:GITHUB_STEP_SUMMARY '```text'
           $out | Add-Content $env:GITHUB_STEP_SUMMARY
           Add-Content $env:GITHUB_STEP_SUMMARY '```'
-          $key = $out | Select-String '^(arch|threshold|expect|autotest|detail|surface|scenario|summary):' | ForEach-Object { $_.Line }
+          $key = $out | Select-String '^(arch|threshold|expect|autotest|detail|surface|scenario|policy|summary):' | ForEach-Object { $_.Line }
           Write-Output "::notice title=probe-hooks ${{ matrix.preset }}::$(($key -join '%0A'))"
           exit $code
       - name: Generate Windhawk mod
