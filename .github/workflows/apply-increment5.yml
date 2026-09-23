@@ -23,6 +23,6 @@ jobs:
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add tests/probe/probe_hooks.cpp .github/workflows/ci.yml docs/design-premises.md
+          git add tests/probe/probe_hooks.cpp docs/design-premises.md
           git commit -m 'test(probe): add Common Controls v6 early-late axis'
           git push origin HEAD:probe-common-controls-v6
