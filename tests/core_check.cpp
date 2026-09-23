@@ -34,5 +34,8 @@ static_assert( EffectiveDark(Mode::FollowSystem, Signals{false, false}));
 
 // Accessibility override is absolute, including ForceDark.
 static_assert(!EffectiveDark(Mode::Disabled,     Signals{true, true}));
+static_assert(!EffectiveDark(Mode::Disabled,     Signals{true, false}));
 static_assert(!EffectiveDark(Mode::ForceDark,    Signals{true, false}));
+static_assert(!EffectiveDark(Mode::ForceDark,    Signals{true, true}));
 static_assert(!EffectiveDark(Mode::FollowSystem, Signals{true, false}));
+static_assert(!EffectiveDark(Mode::FollowSystem, Signals{true, true}));
