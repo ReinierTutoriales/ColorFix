@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <commctrl.h>
 #include <cstdint>
 
 namespace colorfix {
@@ -10,8 +11,7 @@ constexpr bool IsPaletteEncoded(COLORREF c) noexcept {
 }
 
 constexpr bool IsSpecialColor(COLORREF c) noexcept {
-    // Sentinel values used by several Win32/common-control APIs.
-    return c == CLR_INVALID || c == CLR_NONE || c == CLR_DEFAULT || IsPaletteEncoded(c);
+    return c == CLR_INVALID || c == CLR_DEFAULT || IsPaletteEncoded(c);
 }
 
 constexpr COLORREF Rgb(BYTE r, BYTE g, BYTE b) noexcept {
@@ -21,15 +21,17 @@ constexpr COLORREF Rgb(BYTE r, BYTE g, BYTE b) noexcept {
 
 constexpr COLORREF MapLiteralColor(COLORREF c) noexcept {
     if (IsSpecialColor(c)) return c;
-
-    const auto r = GetRValue(c);
-    const auto g = GetGValue(c);
-    const auto b = GetBValue(c);
-
-    // Conservative fallback. Semantic system-color mapping takes precedence.
+    const auto r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
     const unsigned luma = (54u * r + 183u * g + 19u * b) >> 8;
+
+    // Keep ColorFix's own palette as fixed points. Hooks can observe colors
+    // already returned by semantic mappings.
+    if (c == Rgb(32,32,32) || c == Rgb(45,45,45) || c == Rgb(37,37,37) ||
+        c == Rgb(48,48,48) || c == Rgb(65,65,65) || c == Rgb(85,85,85) ||
+        c == Rgb(145,145,145) || c == Rgb(220,220,220)) return c;
+
     if (luma >= 235u) return Rgb(32, 32, 32);
-    if (luma <= 20u)  return Rgb(220, 220, 220);
+    if (luma <= 20u) return Rgb(220, 220, 220);
     return c;
 }
 
