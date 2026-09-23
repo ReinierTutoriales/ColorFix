@@ -4,6 +4,7 @@
 #include <uxtheme.h>
 #include <cstdio>
 #include <cwchar>
+#include <cstring>
 
 #include "MinHook.h"
 
@@ -239,7 +240,14 @@ inline Stats GetStats() noexcept {
 }
 
 inline bool Autotest() noexcept {
-    return (g_open + g_openForDpi) > 0 && g_themeCount > 0;
+    return (g_open + g_openForDpi) > 0 && g_themeCount > 0 && g_dropped == 0;
+}
+
+inline bool SameReportedEvent(const Event& a, const Event& b) noexcept {
+    return a.kind == b.kind && a.part == b.part && a.state == b.state &&
+           a.prop == b.prop && a.width == b.width && a.height == b.height &&
+           std::strcmp(a.attribution, b.attribution) == 0 &&
+           std::wcscmp(ThemeClass(a.theme), ThemeClass(b.theme)) == 0;
 }
 
 inline void PrintReport() {
@@ -247,9 +255,32 @@ inline void PrintReport() {
     std::printf("uxtheme: observer open=%ld open-dpi=%ld draw=%ld draw-ex=%ld color=%ld dropped=%ld %s\n",
                 s.open, s.openForDpi, s.draw, s.drawEx, s.color, s.dropped,
                 Autotest() ? "PASS" : "INFRASTRUCTURE_FAILURE");
+
+    // Keep the CI notice below the ~4 KB annotation limit while preserving
+    // distinct evidence. The fixed buffer still contains every observed event.
+    const LONG themes = g_themeCount < kMaxThemes ? g_themeCount : kMaxThemes;
+    int printedThemes = 0;
+    for (LONG i = 0; i < themes && printedThemes < 8; ++i) {
+        bool duplicate = false;
+        for (LONG j = 0; j < i; ++j)
+            if (std::wcscmp(g_themes[i].klass, g_themes[j].klass) == 0) duplicate = true;
+        if (duplicate) continue;
+        std::printf("uxtheme: theme class=%ls\n", g_themes[i].klass);
+        ++printedThemes;
+    }
+
     const LONG n = g_eventCount < kMaxEvents ? g_eventCount : kMaxEvents;
+    LONG printed[24]{};
+    int printedCount = 0;
+    int uniqueSkipped = 0;
     for (LONG i = 0; i < n; ++i) {
         const Event& e = g_events[i];
+        bool duplicate = false;
+        for (int j = 0; j < printedCount; ++j)
+            if (SameReportedEvent(e, g_events[printed[j]])) duplicate = true;
+        if (duplicate) continue;
+        if (printedCount == 24) { ++uniqueSkipped; continue; }
+        printed[printedCount++] = i;
         const wchar_t* klass = ThemeClass(e.theme);
         if (e.kind == Event::Kind::Color) {
             std::printf("uxtheme: color class=%ls part=%d state=%d prop=%d\n",
@@ -260,6 +291,7 @@ inline void PrintReport() {
                         klass, e.part, e.state, e.width, e.height, e.attribution);
         }
     }
+    std::printf("uxtheme: report unique=%d skipped=%d\n", printedCount, uniqueSkipped);
 }
 
 }  // namespace colorfix::probe::uxtheme_observer
