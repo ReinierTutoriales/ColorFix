@@ -1,0 +1,30 @@
+name: apply-increment7
+
+on:
+  push:
+    branches: [increment7-theme-optout]
+    paths:
+      - tools/apply_increment7.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Apply probe edits
+        run: python tools/apply_increment7.py
+      - name: Commit probe
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tests/probe/probe_hooks.cpp
+          if git diff --cached --quiet; then
+            echo "No probe changes to commit"
+            exit 0
+          fi
+          git commit -m "test(probe): add SetWindowTheme opt-out measurement"
+          git push
