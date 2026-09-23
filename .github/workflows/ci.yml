@@ -1,1 +1,69 @@
-The requested file reference is not currently visible. Use files.search or files.list to rediscover the file, then retry with a returned ref_id or file_id.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, vcarch: amd64, preset: x64 }
+          - { runner: windows-latest, vcarch: amd64_x86, preset: x86 }
+          - { runner: windows-11-arm, vcarch: arm64, preset: arm64 }
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.preset }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.vcarch }}
+      - name: Toolchain
+        shell: pwsh
+        run: |
+          cl 2>&1 | Select-Object -First 1
+          cmake --version
+          ninja --version
+          python --version
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Backend smoke (MinHook-Detours)
+        run: build\\${{ matrix.preset }}\\mhd_smoke.exe
+      - name: Probe increment 0 (capture infrastructure)
+        shell: pwsh
+        run: |
+          $out = & "build\${{ matrix.preset }}\colorfix_probe_infra.exe" 2>&1
+          $code = $LASTEXITCODE
+          $out | Write-Output
+          Add-Content $env:GITHUB_STEP_SUMMARY "### probe-infra ${{ matrix.preset }}"
+          Add-Content $env:GITHUB_STEP_SUMMARY '```text'
+          $out | Add-Content $env:GITHUB_STEP_SUMMARY
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          $key = $out | Select-String '^(arch|os|winstation|session|dwm composition|dpi|window|summary):' | ForEach-Object { $_.Line }
+          Write-Output "::notice title=probe-infra ${{ matrix.preset }}::$(($key -join '%0A'))"
+          exit $code
+      - name: Probe increment 1 (Phase 1 hooks)
+        shell: pwsh
+        run: |
+          $out = & "build\${{ matrix.preset }}\colorfix_probe_hooks.exe" 2>&1
+          $code = $LASTEXITCODE
+          $out | Write-Output
+          Add-Content $env:GITHUB_STEP_SUMMARY "### probe-hooks ${{ matrix.preset }}"
+          Add-Content $env:GITHUB_STEP_SUMMARY '```text'
+          $out | Add-Content $env:GITHUB_STEP_SUMMARY
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          $key = $out | Select-String '^(arch|threshold|expect|autotest|detail|surface|scenario|summary):' | ForEach-Object { $_.Line }
+          Write-Output "::notice title=probe-hooks ${{ matrix.preset }}::$(($key -join '%0A'))"
+          exit $code
+      - name: Generate Windhawk mod
+        run: python windhawk/generate_mod.py
+      - name: Windhawk mod syntax check
+        shell: cmd
+        run: >
+          cl /nologo /std:c++20 /EHsc /Zs /W4 /DUNICODE /D_UNICODE
+          /FI"%GITHUB_WORKSPACE%\tests\windhawk\windhawk_api_stub.h"
+          generated\colorfix.wh.cpp
