@@ -15,6 +15,21 @@ using SetBkColor_t       = COLORREF (WINAPI*)(HDC, COLORREF);
 using CreateSolidBrush_t = HBRUSH   (WINAPI*)(COLORREF);
 using DeleteObject_t     = BOOL     (WINAPI*)(HGDIOBJ);
 
+// Probe-only call counters. Compiled out unless COLORFIX_PROBE is defined, so
+// the Windhawk mod and future ColorFix.dll carry no instrumentation.
+#if defined(COLORFIX_PROBE)
+enum class HookId : int {
+    GetSysColor, GetSysColorBrush, GetStockObject, SetTextColor,
+    SetBkColor, CreateSolidBrush, DeleteObject, Count
+};
+inline std::atomic<long> g_probeCalls[static_cast<int>(HookId::Count)];
+#define COLORFIX_PROBE_HIT(id) \
+    ::colorfix::hooks::g_probeCalls[static_cast<int>(::colorfix::hooks::HookId::id)] \
+        .fetch_add(1, std::memory_order_relaxed)
+#else
+#define COLORFIX_PROBE_HIT(id) ((void)0)
+#endif
+
 inline GetSysColor_t      GetSysColor_Original;
 inline GetSysColorBrush_t GetSysColorBrush_Original;
 inline GetStockObject_t   GetStockObject_Original;
@@ -57,16 +72,19 @@ inline HBRUSH SemanticBrush(int index) {
 }
 
 inline DWORD WINAPI GetSysColor_Hook(int index) {
+    COLORFIX_PROBE_HIT(GetSysColor);
     const COLORREF original = static_cast<COLORREF>(GetSysColor_Original(index));
     return colorfix::MapSystemColor(index, original);
 }
 
 inline HBRUSH WINAPI GetSysColorBrush_Hook(int index) {
+    COLORFIX_PROBE_HIT(GetSysColorBrush);
     if (HBRUSH brush = SemanticBrush(index)) return brush;
     return GetSysColorBrush_Original(index);
 }
 
 inline HGDIOBJ WINAPI GetStockObject_Hook(int object) {
+    COLORFIX_PROBE_HIT(GetStockObject);
     // Only WHITE_BRUSH is treated as a window background. BLACK_BRUSH is used
     // for frames, text and masks: leave it untouched in Phase 1.
     if (object == WHITE_BRUSH)
@@ -75,18 +93,22 @@ inline HGDIOBJ WINAPI GetStockObject_Hook(int object) {
 }
 
 inline COLORREF WINAPI SetTextColor_Hook(HDC dc, COLORREF color) {
+    COLORFIX_PROBE_HIT(SetTextColor);
     return SetTextColor_Original(dc, colorfix::MapLiteralColor(color));
 }
 
 inline COLORREF WINAPI SetBkColor_Hook(HDC dc, COLORREF color) {
+    COLORFIX_PROBE_HIT(SetBkColor);
     return SetBkColor_Original(dc, colorfix::MapLiteralColor(color));
 }
 
 inline HBRUSH WINAPI CreateSolidBrush_Hook(COLORREF color) {
+    COLORFIX_PROBE_HIT(CreateSolidBrush);
     return CreateSolidBrush_Original(colorfix::MapLiteralColor(color));
 }
 
 inline BOOL WINAPI DeleteObject_Hook(HGDIOBJ obj) {
+    COLORFIX_PROBE_HIT(DeleteObject);
     // System/stock brushes must survive DeleteObject; so must ours.
     if (IsColorFixBrush(obj)) return TRUE;
     return DeleteObject_Original(obj);

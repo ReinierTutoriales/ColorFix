@@ -46,6 +46,19 @@ jobs:
           $key = $out | Select-String '^(arch|os|winstation|session|dwm composition|dpi|window|summary):' | ForEach-Object { $_.Line }
           Write-Output "::notice title=probe-infra ${{ matrix.preset }}::$(($key -join '%0A'))"
           exit $code
+      - name: Probe increment 1 (Phase 1 hooks)
+        shell: pwsh
+        run: |
+          $out = & "build\${{ matrix.preset }}\colorfix_probe_hooks.exe" 2>&1
+          $code = $LASTEXITCODE
+          $out | Write-Output
+          Add-Content $env:GITHUB_STEP_SUMMARY "### probe-hooks ${{ matrix.preset }}"
+          Add-Content $env:GITHUB_STEP_SUMMARY '```text'
+          $out | Add-Content $env:GITHUB_STEP_SUMMARY
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          $key = $out | Select-String '^(arch|threshold|expect|autotest|detail|surface|scenario|summary):' | ForEach-Object { $_.Line }
+          Write-Output "::notice title=probe-hooks ${{ matrix.preset }}::$(($key -join '%0A'))"
+          exit $code
       - name: Generate Windhawk mod
         run: python windhawk/generate_mod.py
       - name: Windhawk mod syntax check
