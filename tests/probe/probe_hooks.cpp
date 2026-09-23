@@ -334,6 +334,20 @@ int main() {
     const WindowShot baseE = Shoot(winE);
     const WindowShot baseK = Shoot(winK);
 
+    // Control for DeleteObject.pass: the same check with hooks disabled.
+    // 16x16x32 avoids the 1x1 monochrome stock bitmap CreateBitmap may return.
+    auto realDelete = [](BOOL* ret, DWORD* typeAfter) {
+        HBITMAP bmp = CreateBitmap(16, 16, 1, 32, nullptr);
+        *ret = DeleteObject(bmp);
+        *typeAfter = GetObjectType(bmp);
+        return bmp != nullptr && *ret && *typeAfter == 0;
+    };
+    BOOL ctlRet = FALSE;
+    DWORD ctlType = 0;
+    const bool ctlOk = realDelete(&ctlRet, &ctlType);
+    std::printf("detail: DeleteObject.control(no hooks) ret=%d type-after=%lu %s\n", ctlRet,
+                static_cast<unsigned long>(ctlType), ctlOk ? "OK" : "FAILED");
+
     // Phase B: enable hooks, autotest each one with a direct call.
     st = MH_EnableHook(MH_ALL_HOOKS);
     if (st != MH_OK) { std::printf("setup: MH_EnableHook = %s\n", MH_StatusToString(st)); return 1; }
@@ -401,10 +415,7 @@ int main() {
     run("DeleteObject.pass", HookId::DeleteObject, [&](Autotest& t) {
         // Any other object must really be deleted. A bitmap is used because
         // solid brushes can be recycled by gdi32's client-side brush cache.
-        HBITMAP bmp = CreateBitmap(1, 1, 1, 1, nullptr);
-        passRet = DeleteObject(bmp);
-        passType = GetObjectType(bmp);
-        t.valueOk = bmp && passRet && passType == 0;
+        t.valueOk = realDelete(&passRet, &passType);
     });
     std::printf("detail: DeleteObject.pass ret=%d type-after=%lu\n", passRet,
                 static_cast<unsigned long>(passType));
@@ -419,6 +430,7 @@ int main() {
 
     // ------------------------------------------------------------ report
     bool infraOk = true, behaviorOk = true;
+    if (!ctlOk) infraOk = false;  // DeleteObject.pass has no valid control
 
     std::printf("\n[autotest]\n");
     for (const auto& t : tests) {
