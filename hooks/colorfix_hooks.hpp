@@ -21,7 +21,7 @@ using DefWindowProc_t    = LRESULT  (WINAPI*)(HWND, UINT, WPARAM, LPARAM);
 #if defined(COLORFIX_PROBE)
 enum class HookId : int {
     GetSysColor, GetSysColorBrush, GetStockObject, SetTextColor,
-    SetBkColor, CreateSolidBrush, DeleteObject, DefWindowProcErase, Count
+    SetBkColor, CreateSolidBrush, DeleteObject, DefWindowProcErase, DefWindowProcCtlColor, Count
 };
 inline std::atomic<long> g_probeCalls[static_cast<int>(HookId::Count)];
 #define COLORFIX_PROBE_HIT(id) \
@@ -132,12 +132,50 @@ inline bool EraseWithSemanticBrush(HWND hwnd, HDC dc) {
     return FillRect(dc, &rc, brush) != 0;
 }
 
+// Phase 1b: WM_CTLCOLOR* defaults. The original runs first; its answer is
+// replaced only when it is exactly DefWindowProc's system default for that
+// message (the system brush). Any other answer is returned untouched.
+struct CtlColorDefault { int brush; int bk; int text; };
+
+inline bool CtlColorDefaultFor(UINT msg, CtlColorDefault* d) {
+    switch (msg) {
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+        *d = {COLOR_WINDOW, COLOR_WINDOW, COLOR_WINDOWTEXT};
+        return true;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN:
+    case WM_CTLCOLORDLG:
+        *d = {COLOR_3DFACE, COLOR_3DFACE, COLOR_WINDOWTEXT};
+        return true;
+    case WM_CTLCOLORSCROLLBAR:
+        *d = {COLOR_SCROLLBAR, COLOR_3DHILIGHT, COLOR_3DFACE};
+        return true;
+    }
+    return false;
+}
+
+inline LRESULT AdjustCtlColor(UINT msg, WPARAM wp, LRESULT result) {
+    CtlColorDefault d;
+    if (!CtlColorDefaultFor(msg, &d)) return result;
+    COLORFIX_PROBE_HIT(DefWindowProcCtlColor);
+    if (result != reinterpret_cast<LRESULT>(GetSysColorBrush_Original(d.brush))) return result;
+    HBRUSH brush = SemanticBrush(d.brush);
+    if (!brush) return result;
+    HDC dc = reinterpret_cast<HDC>(wp);
+    SetTextColor_Original(dc, colorfix::MapSystemColor(
+        d.text, static_cast<COLORREF>(GetSysColor_Original(d.text))));
+    SetBkColor_Original(dc, colorfix::MapSystemColor(
+        d.bk, static_cast<COLORREF>(GetSysColor_Original(d.bk))));
+    return reinterpret_cast<LRESULT>(brush);
+}
+
 inline LRESULT WINAPI DefWindowProcW_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_ERASEBKGND) {
         COLORFIX_PROBE_HIT(DefWindowProcErase);
         if (EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp))) return 1;
     }
-    return DefWindowProcW_Original(hwnd, msg, wp, lp);
+    return AdjustCtlColor(msg, wp, DefWindowProcW_Original(hwnd, msg, wp, lp));
 }
 
 inline LRESULT WINAPI DefWindowProcA_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -145,7 +183,7 @@ inline LRESULT WINAPI DefWindowProcA_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         COLORFIX_PROBE_HIT(DefWindowProcErase);
         if (EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp))) return 1;
     }
-    return DefWindowProcA_Original(hwnd, msg, wp, lp);
+    return AdjustCtlColor(msg, wp, DefWindowProcA_Original(hwnd, msg, wp, lp));
 }
 
 template <typename RegisterHook>
