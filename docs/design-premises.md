@@ -171,6 +171,27 @@ Evidence established by the current probes:
     not counted.
   - `comctl32.dll` was absent at process start in every run, so the probe has
     no static dependency that would blur the early/late distinction.
+- UxTheme observation (probe increment 6, passive hooks, both load orders,
+  x64/x86/ARM64):
+  - The passive observer changed no pixels (all increment-5 references held)
+    and lost no events, so these are measurements, not artifacts.
+  - The v6 Edit background is painted by `DrawThemeBackground` with class
+    `Edit`, part 3 = `EP_BACKGROUND`, state 1 = `EBS_NORMAL`.
+  - The v6 push-button face is painted by `DrawThemeBackground` with class
+    `Button`, part 1 = `BP_PUSHBUTTON`, state 1 = `PBS_NORMAL`. No
+    `DrawThemeBackgroundEx` was observed.
+  - The observed `GetThemeColor` calls are not background sources: Edit
+    part 1/state 8 is `EP_EDITTEXT`/`ETS_CUEBANNER`, and property 3803 is
+    `TMT_TEXTCOLOR` (the cue-banner text color). Static and Tooltip query
+    `TMT_TEXTCOLOR` as well. Part, state, and property names were checked
+    against `vsstyle.h`/`vssym32.h`.
+  - Attribution is by theme class plus draw-rect size (90x80), not by HWND or
+    coordinates: these controls draw onto a memory DC, so `WindowFromDC`
+    cannot localize the rect.
+  - Occasionally a query arrives on an `HTHEME` opened before the observer
+    was installed and is logged with an unknown class (property 2425,
+    `TMT_TEXTGLOWSIZE`). It is counted, not dropped, and does not affect the
+    Edit/Button findings.
 
 These results were reproduced by CI on x64, x86, and native ARM64. Increment 3 was squash-merged to `main` as `5cd97a1`; main CI run 48 was reported green on all three architectures.
 
