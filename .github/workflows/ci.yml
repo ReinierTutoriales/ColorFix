@@ -33,6 +33,8 @@ jobs:
         run: cmake --build --preset ${{ matrix.preset }}
       - name: Backend smoke (MinHook-Detours)
         run: build\\${{ matrix.preset }}\\mhd_smoke.exe
+      - name: Probe increment 0 (capture infrastructure)
+        run: build\\${{ matrix.preset }}\\colorfix_probe_infra.exe
       - name: Generate Windhawk mod
         run: python windhawk/generate_mod.py
       - name: Windhawk mod syntax check
