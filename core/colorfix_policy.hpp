@@ -26,9 +26,9 @@ constexpr bool EffectiveDark(Mode mode, Signals signals) noexcept {
     return false;
 }
 
-// ForceDark preserves the current probe/product behavior until configuration
-// explicitly selects another policy. Hooks only pay one relaxed atomic load.
-inline std::atomic<bool> g_effectiveDark{true};
+// Fail-safe default: inactive (pass-through) until a host adapter publishes an
+// explicit mode with real signals. Hooks only pay one relaxed atomic load.
+inline std::atomic<bool> g_effectiveDark{false};
 
 inline bool Active() noexcept {
     return g_effectiveDark.load(std::memory_order_relaxed);

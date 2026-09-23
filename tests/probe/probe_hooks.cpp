@@ -28,6 +28,7 @@
 
 #include "MinHook.h"
 #include "colorfix_hooks.hpp"
+#include "colorfix_runtime.hpp"
 #include "uxtheme_observer.hpp"
 
 #ifndef PW_RENDERFULLCONTENT
@@ -559,7 +560,7 @@ int main(int argc, char** argv) {
         }
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    std::printf("ColorFixProbe increment 7 - UxTheme observation + SetWindowTheme opt-out\n");
+    std::printf("ColorFixProbe increment 8 - runtime policy wiring\n");
 #if defined(_M_ARM64)
     std::printf("arch: ARM64\n");
 #elif defined(_M_X64) || defined(__x86_64__)
@@ -614,6 +615,18 @@ int main(int argc, char** argv) {
     std::printf(", literal white ");
     PrintRgb(kWhite); std::printf("->"); PrintRgb(expLiteral);
     std::printf("\n");
+
+    // Runtime policy: explicit ForceDark with real Windows signals keeps
+    // increments 1-7 comparable. A real signal read failure invalidates the run.
+    const colorfix::runtime::RefreshResult initial =
+        colorfix::runtime::RefreshPolicy(colorfix::policy::Mode::ForceDark);
+    std::printf("runtime: initial mode=ForceDark signals=%s hc=%d light=%d active=%d\n",
+                initial.signalsOk ? "OK" : "FAILED", initial.signals.highContrast ? 1 : 0,
+                initial.signals.appsUseLightTheme ? 1 : 0, initial.after ? 1 : 0);
+    if (!initial.signalsOk) {
+        std::printf("setup: ReadWindowsSignals failed\n");
+        return 1;
+    }
 
     // Phase A: initialize MinHook once. UxTheme observation is enabled now,
     // before any v6 child exists in either order. ColorFix hooks are only
@@ -959,9 +972,6 @@ int main(int argc, char** argv) {
     }
     cfp::Publish(cfp::Mode::ForceDark, {});
 
-    MH_DisableHook(MH_ALL_HOOKS);
-    MH_Uninitialize();
-
     // ------------------------------------------------------------ report
     bool infraOk = true, behaviorOk = true;
     if (!ctlOk) infraOk = false;  // DeleteObject.pass has no valid control
@@ -1211,6 +1221,111 @@ int main(int argc, char** argv) {
     std::printf("uxtheme: passive-pixels %s\n",
                 observerPassive ? "VALID" : "INFRASTRUCTURE_FAILURE");
     uxo::PrintReport();
+
+    // ------------------------------------------------ Phase E: runtime wiring
+    // Product listener (hooks/colorfix_runtime.hpp) in FollowSystem, driven by
+    // the real signal: HKCU AppsUseLightTheme plus a WM_SETTINGCHANGE
+    // "ImmersiveColorSet" broadcast. Reception, policy transition and visual
+    // result are separate verdicts; the ListView cache refresh is a finding.
+    std::printf("\n[runtime wiring] FollowSystem listener, real signals\n");
+    namespace cfr = colorfix::runtime;
+    const wchar_t* const kPersonalize =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
+    DWORD origLight = 1;
+    DWORD origSize = sizeof(origLight);
+    const LSTATUS origStatus = RegGetValueW(HKEY_CURRENT_USER, kPersonalize, L"AppsUseLightTheme",
+                                            RRF_RT_REG_DWORD, nullptr, &origLight, &origSize);
+    const bool listenerOk = cfr::StartListener(cfp::Mode::FollowSystem);
+    if (!listenerOk) infraOk = false;
+    std::printf("runtime: listener %s\n", listenerOk ? "STARTED" : "INFRASTRUCTURE_FAILURE");
+
+    struct RuntimeStep { const char* name; DWORD light; bool expectOn; };
+    const RuntimeStep runtimeSteps[] = {
+        {"to-light",   1, false},
+        {"to-dark",    0, true},
+        {"back-light", 1, false},
+    };
+    auto broadcastThemeChange = [] {
+        DWORD_PTR ignored = 0;
+        SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0,
+                            reinterpret_cast<LPARAM>(L"ImmersiveColorSet"), SMTO_ABORTIFHUNG,
+                            2000, &ignored);
+    };
+    for (const auto& rs : runtimeSteps) {
+        if (!listenerOk) break;
+        const long seen0 = cfr::g_signalsSeen.load();
+        const long trans0 = cfr::g_transitions.load();
+        const long fail0 = cfr::g_signalFailures.load();
+        const bool before = cfp::Active();
+        const LSTATUS written = RegSetKeyValueW(HKEY_CURRENT_USER, kPersonalize,
+                                                L"AppsUseLightTheme", REG_DWORD, &rs.light,
+                                                sizeof(rs.light));
+        broadcastThemeChange();
+        // Wait for the listener thread, then let the posted WM_SYSCOLORCHANGE
+        // and the scheduled repaints run on this thread before capturing.
+        for (int t = 0; t < 60 && cfr::g_signalsSeen.load() == seen0; ++t) Pump(50);
+        Pump(200);
+        const long seen = cfr::g_signalsSeen.load() - seen0;
+        const long trans = cfr::g_transitions.load() - trans0;
+        const long fails = cfr::g_signalFailures.load() - fail0;
+        const bool after = cfp::Active();
+
+        const WindowShot now[3] = {Shoot(winE), Shoot(winK), Shoot(winC)};
+        const WindowShot* base[3] = {&baseE, &baseK, &baseC};
+        const WindowShot* hooked[3] = {&hookE, &hookK, &hookC};
+        int match = 0, total = 0;
+        for (const auto& s : kSurfaces) {
+            const int wi = s.window == 'E' ? 0 : s.window == 'K' ? 1 : 2;
+            const WindowShot& ref = rs.expectOn ? *hooked[wi] : *base[wi];
+            for (int m = 0; m < 2; ++m) {
+                COLORREF want = CLR_INVALID, got = CLR_INVALID;
+                ++total;
+                if (!ref.mode[m].px.empty() && !now[wi].mode[m].px.empty() &&
+                    SurfaceColor(ref.mode[m], s.rect, &want) &&
+                    SurfaceColor(now[wi].mode[m], s.rect, &got) && want == got)
+                    ++match;
+            }
+        }
+        const WindowShot nowL = Shoot(winL);
+        COLORREF lc = CLR_INVALID;
+        ClassifyV6(nowL.mode[0], kV6Surfaces[3].rect, expWindow, &lc);
+        const bool listFollows = lc == (rs.expectOn ? expWindow : baseSysWindow);
+
+        const bool received = written == ERROR_SUCCESS && seen > 0;
+        const bool semanticOk =
+            fails == 0 && after == rs.expectOn && trans == (before != rs.expectOn ? 1 : 0);
+        const bool visualOk = match == total;
+        if (!received) infraOk = false;
+        else if (!semanticOk || !visualOk) behaviorOk = false;
+        std::printf("runtime: %-10s light=%lu received=%ld transitions=%ld signal-failures=%ld "
+                    "active=%d->%d surfaces=%d/%d listview=",
+                    rs.name, static_cast<unsigned long>(rs.light), seen, trans, fails,
+                    before ? 1 : 0, after ? 1 : 0, match, total);
+        PrintRgb(lc);
+        std::printf(" %s %s\n", listFollows ? "FOLLOWS" : "STALE",
+                    !received                  ? "INFRASTRUCTURE_FAILURE"
+                    : (semanticOk && visualOk) ? "PASS"
+                                               : "FAIL");
+    }
+    cfr::StopListener();
+
+    // Restore the runner's original setting whatever happened above.
+    const LSTATUS restored =
+        origStatus == ERROR_SUCCESS
+            ? RegSetKeyValueW(HKEY_CURRENT_USER, kPersonalize, L"AppsUseLightTheme", REG_DWORD,
+                              &origLight, sizeof(origLight))
+            : RegDeleteKeyValueW(HKEY_CURRENT_USER, kPersonalize, L"AppsUseLightTheme");
+    broadcastThemeChange();
+    if (restored != ERROR_SUCCESS) infraOk = false;
+    std::printf("runtime: restore AppsUseLightTheme=%s %s\n",
+                origStatus == ERROR_SUCCESS ? (origLight ? "1" : "0") : "absent",
+                restored == ERROR_SUCCESS ? "OK" : "INFRASTRUCTURE_FAILURE");
+
+    // Phase E must run with the same installed hooks it is validating. Tear
+    // MinHook down only after the listener has stopped and the runner setting
+    // has been restored.
+    MH_DisableHook(MH_ALL_HOOKS);
+    MH_Uninitialize();
 
     const int code = !infraOk ? 1 : !behaviorOk ? 2 : 0;
     std::printf("\nsummary: infrastructure=%s hooks=%s exit=%d\n",

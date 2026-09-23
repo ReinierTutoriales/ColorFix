@@ -33,7 +33,7 @@ target_compile_definitions(colorfix_probe_hooks PRIVATE
   COLORFIX_PROBE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(colorfix_probe_hooks PRIVATE
   "${PROJECT_SOURCE_DIR}/core" "${PROJECT_SOURCE_DIR}/hooks")
-target_link_libraries(colorfix_probe_hooks PRIVATE minhook_detours user32 gdi32 dwmapi)
+target_link_libraries(colorfix_probe_hooks PRIVATE minhook_detours user32 gdi32 dwmapi advapi32)
 
 add_library(colorfix_core_check OBJECT tests/core_check.cpp)
 target_include_directories(colorfix_core_check PRIVATE "${PROJECT_SOURCE_DIR}/core")

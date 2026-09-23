@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CORE = ROOT / "core"
 HOOKS = ROOT / "hooks" / "colorfix_hooks.hpp"
+RUNTIME = ROOT / "hooks" / "colorfix_runtime.hpp"
 TEMPLATE = ROOT / "windhawk" / "colorfix.wh.template.cpp"
 OUTPUT = ROOT / "generated" / "colorfix.wh.cpp"
 CORE_MARKER = "// @@COLORFIX_CORE@@"
@@ -67,6 +68,8 @@ def main():
 
     hooks_body = ["// ---- hooks/colorfix_hooks.hpp ----"]
     hooks_body.extend(flatten(HOOKS, sys_includes))
+    hooks_body.append("// ---- hooks/colorfix_runtime.hpp ----")
+    hooks_body.extend(flatten(RUNTIME, sys_includes))
 
     includes = "\n".join(f"#include <{name}>" for name in sys_includes)
     core_block = "\n".join([
@@ -82,7 +85,8 @@ def main():
     OUTPUT.write_text(out, encoding="utf-8", newline="\n")
     print(
         f"{OUTPUT.relative_to(ROOT)}: {len(out.splitlines())} lines, "
-        f"core headers: {', '.join(order)}, hooks: {HOOKS.relative_to(ROOT)}"
+        f"core headers: {', '.join(order)}, hooks: {HOOKS.relative_to(ROOT)}, "
+        f"{RUNTIME.relative_to(ROOT)}"
     )
 
 if __name__ == "__main__":
