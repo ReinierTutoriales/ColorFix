@@ -1,0 +1,23 @@
+name: move-increment8-teardown
+
+on:
+  push:
+    branches: [increment8-runtime-policy]
+    paths:
+      - tools/move-increment8-teardown.trigger
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - run: python tools/move_increment8_teardown.py
+      - run: git push origin HEAD:increment8-runtime-policy
