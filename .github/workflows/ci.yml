@@ -49,25 +49,31 @@ jobs:
       - name: Probe increment 1 (Phase 1 hooks)
         shell: pwsh
         run: |
-          $out = & "build\${{ matrix.preset }}\colorfix_probe_hooks.exe" 2>&1
-          $code = $LASTEXITCODE
-          $out | Write-Output
-          Add-Content $env:GITHUB_STEP_SUMMARY "### probe-hooks ${{ matrix.preset }}"
-          Add-Content $env:GITHUB_STEP_SUMMARY '```text'
-          $out | Add-Content $env:GITHUB_STEP_SUMMARY
-          Add-Content $env:GITHUB_STEP_SUMMARY '```'
-          # Annotations are truncated at about 4 KB: publish the verdict first,
-          # then autotests and surfaces as separate notices.
-          $groups = [ordered]@{
-            'result'    = '^(arch|summary|policy):'
-            'autotests' = '^(threshold|expect|autotest|detail):'
-            'surfaces'  = '^(surface|scenario):'
+          # Two processes: comctl32 v6 cannot be unloaded, so each order needs
+          # its own. 2 orders x 4 groups = 8 notices (GitHub allows 10 per step).
+          $final = 0
+          foreach ($order in @('early', 'late')) {
+            $out = & "build\${{ matrix.preset }}\colorfix_probe_hooks.exe" "--order=$order" 2>&1
+            $code = $LASTEXITCODE
+            if ($code -ne 0 -and $final -eq 0) { $final = $code }
+            $out | Write-Output
+            Add-Content $env:GITHUB_STEP_SUMMARY "### probe-hooks ${{ matrix.preset }} $order"
+            Add-Content $env:GITHUB_STEP_SUMMARY '```text'
+            $out | Add-Content $env:GITHUB_STEP_SUMMARY
+            Add-Content $env:GITHUB_STEP_SUMMARY '```'
+            # Annotations are truncated at about 4 KB: verdict first, then groups.
+            $groups = [ordered]@{
+              'result'    = '^(arch|order|summary|policy):'
+              'autotests' = '^(threshold|expect|autotest|detail):'
+              'surfaces'  = '^(surface|scenario):'
+              'v6'        = '^(comctl32|v6|v6scenario):'
+            }
+            foreach ($g in $groups.GetEnumerator()) {
+              $lines = $out | Select-String $g.Value | ForEach-Object { $_.Line }
+              Write-Output "::notice title=probe-hooks ${{ matrix.preset }} $order $($g.Key)::$(($lines -join '%0A'))"
+            }
           }
-          foreach ($g in $groups.GetEnumerator()) {
-            $lines = $out | Select-String $g.Value | ForEach-Object { $_.Line }
-            Write-Output "::notice title=probe-hooks ${{ matrix.preset }} $($g.Key)::$(($lines -join '%0A'))"
-          }
-          exit $code
+          exit $final
       - name: Generate Windhawk mod
         run: python windhawk/generate_mod.py
       - name: Windhawk mod syntax check
