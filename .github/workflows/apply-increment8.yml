@@ -16,10 +16,11 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - name: Apply exact increment 8 patch
-        run: python tools/apply_increment8.py
-      - name: Push patch commit
+      - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git push origin HEAD:increment8-runtime-policy
+      - name: Apply exact increment 8 patch
+        run: python tools/apply_increment8.py
+      - name: Push patch commit
+        run: git push origin HEAD:increment8-runtime-policy
