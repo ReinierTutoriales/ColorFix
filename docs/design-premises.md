@@ -65,14 +65,38 @@ cache colors too. On an effective-state change:
 Some applications may not refresh all cached state and can require a restart.
 That is a product limitation to document rather than hide.
 
-## 6. Disabled processes and final injection model
+## 6. Disabled processes and candidate injection models
 
-In the final `SetWindowsHookEx` injection architecture, an unselected or
-disabled application should remain inert: the DLL may be resident because of
-the global hook mechanism, but it must not install ColorFix rendering hooks.
+The standalone injection model is **not decided yet**. SetWindowsHookEx is a
+documented candidate, not the final architecture. Compare three candidates with
+the same measurements before choosing:
+
+1. Global SetWindowsHookEx / WH_CBT: no polling and no privileged service, but
+   it is a desktop-wide shared resource and matching DLLs can become resident
+   in non-selected GUI processes. Architecture-specific hosts/DLLs are required.
+2. Process detection + directed injection: touches only selected processes, but
+   under the current unprivileged/no-polling requirement it has no suitable
+   process-start notification. ETW Kernel-Process / Win32_ProcessStartTrace are
+   treated as privileged candidates for this design; otherwise use polling or
+   a privileged service.
+3. Launcher injection: ColorFix starts a selected application suspended, loads
+   ColorFix, then resumes it. This avoids a global hook and privileged
+   process-start monitoring and provides the earliest injection point, before
+   later UI initialization/caching. Coverage is limited to launches routed
+   through ColorFix, such as its shortcut or an association.
+
+Measure startup latency, steady-state overhead, process coverage, architecture
+behavior, compatibility/conflicts, security/privilege requirements, and how
+early ColorFix is active. Do not select a model from API status alone.
+
+If SetWindowsHookEx is selected, an unselected/disabled process must remain
+inert: DLL residency caused by the global hook must not install ColorFix
+rendering hooks. Process selection is evaluated once outside loader lock and
+cached; the hook procedure must not repeatedly perform configuration/process
+selection.
 
 The atomic pass-through state is for a process whose rendering hooks were
-already installed and whose effective state changes while it is running.
+already installed and whose effective theme policy changes while it is running.
 
 ## 7. Preserve explicit application choices
 
@@ -122,7 +146,7 @@ Evidence established by the current probes:
 - The scrollbar observation is informational only; no stronger conclusion is
   established yet.
 
-These results were reproduced by CI on x64, x86, and native ARM64.
+These results were reproduced by CI on x64, x86, and native ARM64. Increment 3 was squash-merged to `main` as `5cd97a1`; main CI run 48 was reported green on all three architectures.
 
 ## 10. Requirements for future rendering mechanisms
 
@@ -135,7 +159,35 @@ Windhawk generation currently incorporates shared hooks from `hooks/`.
 Syntax validation of the generated mod is not equivalent to runtime validation
 inside Windhawk; keep that distinction explicit.
 
-## 11. Maintenance rule
+## 11. Windows compatibility and performance principles
+
+- Prefer documented Windows APIs when they can produce the required result.
+  Hooking exists to cover behavior that public APIs cannot retrofit into a
+  legacy third-party process.
+- Keep rendering-hook hot paths allocation-free and lock-free where practical.
+  Do not read the registry, enumerate processes/windows, perform IPC, or
+  recalculate process selection on every intercepted call.
+- Cache process-selection state after safe initialization outside loader lock.
+- High Contrast is inviolable and overrides every dark-mode policy.
+- If a global Windows hook is used, chain with CallNextHookEx except where a
+  specific hook contract demonstrably requires consuming the notification.
+- Treat architecture matching as a hard injection constraint. Validate x86,
+  x64, native ARM64, and later ARM64 emulation scenarios separately.
+- Use DwmSetWindowAttribute with DWMWA_USE_IMMERSIVE_DARK_MODE for the Windows
+  11 non-client frame/title bar where applicable. It is documented and covers
+  a region the current GDI/USER32 color hooks do not. Its documented behavior
+  honors the system dark-mode setting; future ForceDark behavior must be tested
+  rather than assumed from this attribute.
+- Keep undocumented UxTheme mechanisms, including DarkMode_* theme-class
+  conventions and undocumented ordinals, isolated behind a replaceable
+  boundary. They must not become dependencies of the core mapper/policy.
+- Benchmark candidate injection models under equivalent workloads before
+  selecting the standalone architecture. Global-hook convenience is not proof
+  of lower system cost.
+- Preserve the distinction between documented API behavior, measured ColorFix
+  behavior, and implementation assumptions.
+
+## 12. Maintenance rule
 
 Update this document when an increment:
 
