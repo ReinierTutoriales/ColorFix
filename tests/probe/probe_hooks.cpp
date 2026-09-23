@@ -1273,6 +1273,22 @@ int main(int argc, char** argv) {
         const long fails = cfr::g_signalFailures.load() - fail0;
         const bool after = cfp::Active();
 
+        // Direct liveness oracle: prove the installed hooks still intercept after
+        // the real WM_SETTINGCHANGE transition, independently of repaint paths.
+        const Counts live0 = Snapshot();
+        const COLORREF liveSys = GetSysColor(COLOR_WINDOW);
+        HBRUSH liveBrush = CreateSolidBrush(kWhite);
+        const COLORREF liveCreated = BrushColor(liveBrush);
+        DeleteObject(liveBrush);
+        const Counts live1 = Snapshot();
+        std::printf("runtime-detail: hook-live active=%d sys=", cfp::Active() ? 1 : 0);
+        PrintRgb(liveSys);
+        std::printf(" brush=");
+        PrintRgb(liveCreated);
+        std::printf(" calls GetSysColor=%ld CreateSolidBrush=%ld\n",
+                    Delta(live0, live1, HookId::GetSysColor),
+                    Delta(live0, live1, HookId::CreateSolidBrush));
+
         const Counts runtimeBefore = Snapshot();
         const WindowShot now[3] = {Shoot(winE), Shoot(winK), Shoot(winC)};
         const Counts runtimeAfter = Snapshot();
