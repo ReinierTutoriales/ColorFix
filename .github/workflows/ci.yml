@@ -34,7 +34,16 @@ jobs:
       - name: Backend smoke (MinHook-Detours)
         run: build\\${{ matrix.preset }}\\mhd_smoke.exe
       - name: Probe increment 0 (capture infrastructure)
-        run: build\\${{ matrix.preset }}\\colorfix_probe_infra.exe
+        shell: pwsh
+        run: |
+          $out = & "build\${{ matrix.preset }}\colorfix_probe_infra.exe" 2>&1
+          $code = $LASTEXITCODE
+          $out | Write-Output
+          Add-Content $env:GITHUB_STEP_SUMMARY "### probe-infra ${{ matrix.preset }}"
+          Add-Content $env:GITHUB_STEP_SUMMARY '```text'
+          $out | Add-Content $env:GITHUB_STEP_SUMMARY
+          Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          exit $code
       - name: Generate Windhawk mod
         run: python windhawk/generate_mod.py
       - name: Windhawk mod syntax check
