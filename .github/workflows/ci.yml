@@ -43,6 +43,8 @@ jobs:
           Add-Content $env:GITHUB_STEP_SUMMARY '```text'
           $out | Add-Content $env:GITHUB_STEP_SUMMARY
           Add-Content $env:GITHUB_STEP_SUMMARY '```'
+          $key = $out | Select-String '^(arch|os|winstation|session|dwm|dpi|window|summary):' | ForEach-Object { $_.Line }
+          Write-Output "::notice title=probe-infra ${{ matrix.preset }}::$(($key -join '%0A'))"
           exit $code
       - name: Generate Windhawk mod
         run: python windhawk/generate_mod.py
