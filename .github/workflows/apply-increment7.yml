@@ -5,6 +5,7 @@ on:
     branches: [increment7-theme-optout]
     paths:
       - tools/apply_increment7.py
+      - .github/workflows/apply-increment7.yml
 
 permissions:
   contents: write
