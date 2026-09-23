@@ -61,7 +61,12 @@ BOOL Wh_ModInit() {
         Wh_Log(L"ColorFix: policy listener failed; theme changes need a restart");
     // Hooks queued during Wh_ModInit are applied by Windhawk after it returns.
     // Wh_ApplyHookOperations is only for hooks queued after initialization.
-    return colorfix::hooks::RegisterPhase1Hooks(WindhawkRegisterHook) ? TRUE : FALSE;
+    if (!colorfix::hooks::RegisterPhase1Hooks(WindhawkRegisterHook)) {
+        // Windhawk won't call later callbacks when Wh_ModInit returns FALSE.
+        colorfix::runtime::StopListener();
+        return FALSE;
+    }
+    return TRUE;
 }
 
 void Wh_ModSettingsChanged() {

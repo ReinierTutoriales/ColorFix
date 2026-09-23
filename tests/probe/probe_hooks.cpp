@@ -1273,7 +1273,9 @@ int main(int argc, char** argv) {
         const long fails = cfr::g_signalFailures.load() - fail0;
         const bool after = cfp::Active();
 
+        const Counts runtimeBefore = Snapshot();
         const WindowShot now[3] = {Shoot(winE), Shoot(winK), Shoot(winC)};
+        const Counts runtimeAfter = Snapshot();
         const WindowShot* base[3] = {&baseE, &baseK, &baseC};
         const WindowShot* hooked[3] = {&hookE, &hookK, &hookC};
         int match = 0, total = 0;
@@ -1283,10 +1285,17 @@ int main(int argc, char** argv) {
             for (int m = 0; m < 2; ++m) {
                 COLORREF want = CLR_INVALID, got = CLR_INVALID;
                 ++total;
-                if (!ref.mode[m].px.empty() && !now[wi].mode[m].px.empty() &&
+                const bool surfaceOk =
+                    !ref.mode[m].px.empty() && !now[wi].mode[m].px.empty() &&
                     SurfaceColor(ref.mode[m], s.rect, &want) &&
-                    SurfaceColor(now[wi].mode[m], s.rect, &got) && want == got)
-                    ++match;
+                    SurfaceColor(now[wi].mode[m], s.rect, &got) && want == got;
+                if (surfaceOk) ++match;
+                std::printf("runtime-detail: %-18s mode=%s want=", s.name,
+                            m == 0 ? "flags0" : "full");
+                PrintRgb(want);
+                std::printf(" got=");
+                PrintRgb(got);
+                std::printf(" %s\n", surfaceOk ? "MATCH" : "MISS");
             }
         }
         const WindowShot nowL = Shoot(winL);
@@ -1298,6 +1307,17 @@ int main(int argc, char** argv) {
         const bool semanticOk =
             fails == 0 && after == rs.expectOn && trans == (before != rs.expectOn ? 1 : 0);
         const bool visualOk = match == total;
+        std::printf("runtime-detail: hook-delta GetSysColor=%ld GetSysColorBrush=%ld "
+                    "GetStockObject=%ld SetTextColor=%ld SetBkColor=%ld "
+                    "CreateSolidBrush=%ld DefWindowProcErase=%ld DefWindowProcCtlColor=%ld\n",
+                    Delta(runtimeBefore, runtimeAfter, HookId::GetSysColor),
+                    Delta(runtimeBefore, runtimeAfter, HookId::GetSysColorBrush),
+                    Delta(runtimeBefore, runtimeAfter, HookId::GetStockObject),
+                    Delta(runtimeBefore, runtimeAfter, HookId::SetTextColor),
+                    Delta(runtimeBefore, runtimeAfter, HookId::SetBkColor),
+                    Delta(runtimeBefore, runtimeAfter, HookId::CreateSolidBrush),
+                    Delta(runtimeBefore, runtimeAfter, HookId::DefWindowProcErase),
+                    Delta(runtimeBefore, runtimeAfter, HookId::DefWindowProcCtlColor));
         if (!received) infraOk = false;
         else if (!semanticOk || !visualOk) behaviorOk = false;
         std::printf("runtime: %-10s light=%lu received=%ld transitions=%ld signal-failures=%ld "
