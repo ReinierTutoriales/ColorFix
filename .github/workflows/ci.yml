@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, vcarch: amd64, preset: x64 }
+          - { runner: windows-latest, vcarch: amd64_x86, preset: x86 }
+          - { runner: windows-11-arm, vcarch: arm64, preset: arm64 }
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.preset }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.vcarch }}
+      - name: Toolchain
+        shell: pwsh
+        run: |
+          cl 2>&1 | Select-Object -First 1
+          cmake --version
+          ninja --version
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Windhawk mod syntax check
+        shell: cmd
+        run: cl /nologo /std:c++20 /EHsc /Zs /W4 /DUNICODE /D_UNICODE /FItests/windhawk/windhawk_api_stub.h windhawk/colorfix.wh.cpp
