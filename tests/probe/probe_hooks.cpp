@@ -335,18 +335,22 @@ int main() {
     const WindowShot baseK = Shoot(winK);
 
     // Control for DeleteObject.pass: the same check with hooks disabled.
-    // 16x16x32 avoids the 1x1 monochrome stock bitmap CreateBitmap may return.
-    auto realDelete = [](BOOL* ret, DWORD* typeAfter) {
+    // Oracle: the process GDI object count. GetObjectType still reported
+    // OBJ_BITMAP for deleted handles on all three runners, even without hooks.
+    struct DeleteCheck { BOOL ret; long createdDelta; long finalDelta; };
+    auto realDelete = [](DeleteCheck* c) {
+        HANDLE self = GetCurrentProcess();
+        const long before = static_cast<long>(GetGuiResources(self, GR_GDIOBJECTS));
         HBITMAP bmp = CreateBitmap(16, 16, 1, 32, nullptr);
-        *ret = DeleteObject(bmp);
-        *typeAfter = GetObjectType(bmp);
-        return bmp != nullptr && *ret && *typeAfter == 0;
+        c->createdDelta = static_cast<long>(GetGuiResources(self, GR_GDIOBJECTS)) - before;
+        c->ret = DeleteObject(bmp);
+        c->finalDelta = static_cast<long>(GetGuiResources(self, GR_GDIOBJECTS)) - before;
+        return bmp != nullptr && c->ret && c->createdDelta == 1 && c->finalDelta == 0;
     };
-    BOOL ctlRet = FALSE;
-    DWORD ctlType = 0;
-    const bool ctlOk = realDelete(&ctlRet, &ctlType);
-    std::printf("detail: DeleteObject.control(no hooks) ret=%d type-after=%lu %s\n", ctlRet,
-                static_cast<unsigned long>(ctlType), ctlOk ? "OK" : "FAILED");
+    DeleteCheck ctl{};
+    const bool ctlOk = realDelete(&ctl);
+    std::printf("detail: DeleteObject.control(no hooks) ret=%d created=%+ld final=%+ld %s\n",
+                ctl.ret, ctl.createdDelta, ctl.finalDelta, ctlOk ? "OK" : "FAILED");
 
     // Phase B: enable hooks, autotest each one with a direct call.
     st = MH_EnableHook(MH_ALL_HOOKS);
@@ -410,15 +414,14 @@ int main() {
     });
     std::printf("detail: DeleteObject.own ret=%d type=%lu\n", ownRet,
                 static_cast<unsigned long>(GetObjectType(own)));
-    BOOL passRet = FALSE;
-    DWORD passType = 0;
+    DeleteCheck pass{};
     run("DeleteObject.pass", HookId::DeleteObject, [&](Autotest& t) {
         // Any other object must really be deleted. A bitmap is used because
         // solid brushes can be recycled by gdi32's client-side brush cache.
-        t.valueOk = realDelete(&passRet, &passType);
+        t.valueOk = realDelete(&pass);
     });
-    std::printf("detail: DeleteObject.pass ret=%d type-after=%lu\n", passRet,
-                static_cast<unsigned long>(passType));
+    std::printf("detail: DeleteObject.pass ret=%d created=%+ld final=%+ld\n", pass.ret,
+                pass.createdDelta, pass.finalDelta);
     DeleteDC(testDc);
 
     // Phase C: hooked capture.
