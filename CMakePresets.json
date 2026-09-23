@@ -2,13 +2,33 @@
   "version": 6,
   "configurePresets": [
     {
-      "name": "ninja",
-      "displayName": "Ninja - compiler from environment",
+      "name": "base",
+      "hidden": true,
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/ninja"
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "x64",
+      "inherits": "base",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "cacheVariables": { "COLORFIX_EXPECTED_ARCH": "X64" }
+    },
+    {
+      "name": "x86",
+      "inherits": "base",
+      "architecture": { "value": "x86", "strategy": "external" },
+      "cacheVariables": { "COLORFIX_EXPECTED_ARCH": "X86" }
+    },
+    {
+      "name": "arm64",
+      "inherits": "base",
+      "architecture": { "value": "arm64", "strategy": "external" },
+      "cacheVariables": { "COLORFIX_EXPECTED_ARCH": "ARM64" }
     }
   ],
   "buildPresets": [
-    { "name": "ninja-debug", "configurePreset": "ninja" }
+    { "name": "x64", "configurePreset": "x64" },
+    { "name": "x86", "configurePreset": "x86" },
+    { "name": "arm64", "configurePreset": "arm64" }
   ]
 }
