@@ -972,9 +972,6 @@ int main(int argc, char** argv) {
     }
     cfp::Publish(cfp::Mode::ForceDark, {});
 
-    MH_DisableHook(MH_ALL_HOOKS);
-    MH_Uninitialize();
-
     // ------------------------------------------------------------ report
     bool infraOk = true, behaviorOk = true;
     if (!ctlOk) infraOk = false;  // DeleteObject.pass has no valid control
@@ -1376,6 +1373,12 @@ int main(int argc, char** argv) {
     std::printf("runtime: restore AppsUseLightTheme=%s %s\n",
                 origStatus == ERROR_SUCCESS ? (origLight ? "1" : "0") : "absent",
                 restored == ERROR_SUCCESS ? "OK" : "INFRASTRUCTURE_FAILURE");
+
+    // Phase E must run with the same installed hooks it is validating. Tear
+    // MinHook down only after the listener has stopped and the runner setting
+    // has been restored.
+    MH_DisableHook(MH_ALL_HOOKS);
+    MH_Uninitialize();
 
     const int code = !infraOk ? 1 : !behaviorOk ? 2 : 0;
     std::printf("\nsummary: infrastructure=%s hooks=%s exit=%d\n",
