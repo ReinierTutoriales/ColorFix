@@ -9,4 +9,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+add_library(colorfix_core_check OBJECT tests/core_check.cpp)
+target_include_directories(colorfix_core_check PRIVATE "${PROJECT_SOURCE_DIR}/core")
+
 add_subdirectory(tests/win32)
