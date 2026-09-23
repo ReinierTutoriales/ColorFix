@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(ColorFix VERSION 0.1.0 LANGUAGES CXX)
+project(ColorFix VERSION 0.1.0 LANGUAGES C CXX)
 
 set(COLORFIX_EXPECTED_ARCH "" CACHE STRING "Expected architecture: X64, X86 or ARM64")
 if(COLORFIX_EXPECTED_ARCH)
@@ -18,6 +18,11 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+include(cmake/minhook_detours.cmake)
+
+add_executable(mhd_smoke tests/backend/mhd_smoke.cpp)
+target_link_libraries(mhd_smoke PRIVATE minhook_detours user32)
 
 add_library(colorfix_core_check OBJECT tests/core_check.cpp)
 target_include_directories(colorfix_core_check PRIVATE "${PROJECT_SOURCE_DIR}/core")
