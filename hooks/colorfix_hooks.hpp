@@ -14,13 +14,14 @@ using SetTextColor_t     = COLORREF (WINAPI*)(HDC, COLORREF);
 using SetBkColor_t       = COLORREF (WINAPI*)(HDC, COLORREF);
 using CreateSolidBrush_t = HBRUSH   (WINAPI*)(COLORREF);
 using DeleteObject_t     = BOOL     (WINAPI*)(HGDIOBJ);
+using DefWindowProc_t    = LRESULT  (WINAPI*)(HWND, UINT, WPARAM, LPARAM);
 
 // Probe-only call counters. Compiled out unless COLORFIX_PROBE is defined, so
 // the Windhawk mod and future ColorFix.dll carry no instrumentation.
 #if defined(COLORFIX_PROBE)
 enum class HookId : int {
     GetSysColor, GetSysColorBrush, GetStockObject, SetTextColor,
-    SetBkColor, CreateSolidBrush, DeleteObject, Count
+    SetBkColor, CreateSolidBrush, DeleteObject, DefWindowProcErase, Count
 };
 inline std::atomic<long> g_probeCalls[static_cast<int>(HookId::Count)];
 #define COLORFIX_PROBE_HIT(id) \
@@ -37,6 +38,8 @@ inline SetTextColor_t     SetTextColor_Original;
 inline SetBkColor_t       SetBkColor_Original;
 inline CreateSolidBrush_t CreateSolidBrush_Original;
 inline DeleteObject_t     DeleteObject_Original;
+inline DefWindowProc_t    DefWindowProcW_Original;
+inline DefWindowProc_t    DefWindowProcA_Original;
 
 // One process-lifetime brush per system color index, derived from core roles.
 // COLOR_MENUBAR (30) is the highest defined index.
@@ -114,6 +117,37 @@ inline BOOL WINAPI DeleteObject_Hook(HGDIOBJ obj) {
     return DeleteObject_Original(obj);
 }
 
+// Phase 1b: class background erase. DefWindowProc erases with the class brush
+// through an internal path that never calls the hooked exports (probe
+// increment 1), so WM_ERASEBKGND is intercepted at DefWindowProc itself.
+// Only system-color class brushes (COLOR_x + 1) are remapped; real brush
+// handles and anything else fall through to the original.
+inline bool EraseWithSemanticBrush(HWND hwnd, HDC dc) {
+    const ULONG_PTR cls = GetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND);
+    if (cls == 0 || cls > static_cast<ULONG_PTR>(kSysColorCount)) return false;
+    HBRUSH brush = SemanticBrush(static_cast<int>(cls) - 1);
+    if (!brush) return false;
+    RECT rc;
+    if (!GetClientRect(hwnd, &rc)) return false;
+    return FillRect(dc, &rc, brush) != 0;
+}
+
+inline LRESULT WINAPI DefWindowProcW_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_ERASEBKGND) {
+        COLORFIX_PROBE_HIT(DefWindowProcErase);
+        if (EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp))) return 1;
+    }
+    return DefWindowProcW_Original(hwnd, msg, wp, lp);
+}
+
+inline LRESULT WINAPI DefWindowProcA_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_ERASEBKGND) {
+        COLORFIX_PROBE_HIT(DefWindowProcErase);
+        if (EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp))) return 1;
+    }
+    return DefWindowProcA_Original(hwnd, msg, wp, lp);
+}
+
 template <typename RegisterHook>
 inline bool RegisterPhase1Hooks(RegisterHook&& registerHook) {
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
@@ -128,6 +162,8 @@ inline bool RegisterPhase1Hooks(RegisterHook&& registerHook) {
     ok &= registerHook(gdi32,  "SetBkColor",       reinterpret_cast<void*>(SetBkColor_Hook),       reinterpret_cast<void**>(&SetBkColor_Original));
     ok &= registerHook(gdi32,  "CreateSolidBrush", reinterpret_cast<void*>(CreateSolidBrush_Hook), reinterpret_cast<void**>(&CreateSolidBrush_Original));
     ok &= registerHook(gdi32,  "DeleteObject",     reinterpret_cast<void*>(DeleteObject_Hook),     reinterpret_cast<void**>(&DeleteObject_Original));
+    ok &= registerHook(user32, "DefWindowProcW",   reinterpret_cast<void*>(DefWindowProcW_Hook),   reinterpret_cast<void**>(&DefWindowProcW_Original));
+    ok &= registerHook(user32, "DefWindowProcA",   reinterpret_cast<void*>(DefWindowProcA_Hook),   reinterpret_cast<void**>(&DefWindowProcA_Original));
     return ok;
 }
 

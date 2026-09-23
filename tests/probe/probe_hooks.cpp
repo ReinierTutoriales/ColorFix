@@ -205,7 +205,7 @@ void Pump(DWORD ms) {
 
 constexpr const char* kHookNames[] = {
     "GetSysColor", "GetSysColorBrush", "GetStockObject", "SetTextColor",
-    "SetBkColor", "CreateSolidBrush", "DeleteObject",
+    "SetBkColor", "CreateSolidBrush", "DeleteObject", "DefWindowProcErase",
 };
 constexpr int kHookCount = static_cast<int>(HookId::Count);
 
@@ -289,7 +289,7 @@ HWND MakeWindow(const wchar_t* cls, char tag, int y) {
 
 int main() {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    std::printf("ColorFixProbe increment 1 - Phase 1 hooks, no Common Controls\n");
+    std::printf("ColorFixProbe increment 2 - Phase 1 + 1b hooks, no Common Controls\n");
 #if defined(_M_ARM64)
     std::printf("arch: ARM64\n");
 #elif defined(_M_X64) || defined(__x86_64__)
@@ -422,6 +422,36 @@ int main() {
     });
     std::printf("detail: DeleteObject.pass ret=%d created=%+ld final=%+ld\n", pass.ret,
                 pass.createdDelta, pass.finalDelta);
+    run("DefWindowProcErase", HookId::DefWindowProcErase, [&](Autotest& t) {
+        // Direct WM_ERASEBKGND on window K into a memory DIB: the detour must
+        // fill it with the semantic COLOR_WINDOW brush and return 1.
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = kWidth;
+        bi.bmiHeader.biHeight = -kHeight;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HBITMAP dib = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HDC dc = CreateCompatibleDC(nullptr);
+        if (!dib || !dc || !bits) {
+            if (dc) DeleteDC(dc);
+            if (dib) DeleteObject(dib);
+            return;
+        }
+        HGDIOBJ old = SelectObject(dc, dib);
+        const LRESULT r = DefWindowProcW(winK, WM_ERASEBKGND, reinterpret_cast<WPARAM>(dc), 0);
+        GdiFlush();
+        const std::uint32_t v =
+            static_cast<std::uint32_t*>(bits)[(kHeight / 2) * kWidth + kWidth / 2];
+        SelectObject(dc, old);
+        DeleteDC(dc);
+        DeleteObject(dib);
+        t.expected = expWindow;
+        t.observed = RGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+        t.valueOk = r == 1 && t.observed == t.expected;
+    });
     DeleteDC(testDc);
 
     // Phase C: hooked capture.
