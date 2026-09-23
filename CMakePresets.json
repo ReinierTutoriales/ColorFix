@@ -1,0 +1,21 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "x64",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build/x64",
+      "architecture": "x64"
+    },
+    {
+      "name": "arm64",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build/arm64",
+      "architecture": "ARM64"
+    }
+  ],
+  "buildPresets": [
+    { "name": "x64-debug", "configurePreset": "x64", "configuration": "Debug" },
+    { "name": "arm64-debug", "configurePreset": "arm64", "configuration": "Debug" }
+  ]
+}
