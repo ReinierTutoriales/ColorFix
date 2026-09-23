@@ -3,3 +3,4 @@
 #include <windows.h>
 inline void Wh_Log(const wchar_t*, ...) {}
 inline BOOL Wh_SetFunctionHook(void*, void*, void**) { return TRUE; }
+inline BOOL Wh_ApplyHookOperations() { return TRUE; }
