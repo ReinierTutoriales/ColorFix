@@ -4,6 +4,7 @@
 #include <windows.h>
 
 #include "colorfix_mapper.hpp"
+#include "colorfix_policy.hpp"
 
 namespace colorfix::hooks {
 
@@ -76,18 +77,21 @@ inline HBRUSH SemanticBrush(int index) {
 
 inline DWORD WINAPI GetSysColor_Hook(int index) {
     COLORFIX_PROBE_HIT(GetSysColor);
+    if (!colorfix::policy::Active()) return GetSysColor_Original(index);
     const COLORREF original = static_cast<COLORREF>(GetSysColor_Original(index));
     return colorfix::MapSystemColor(index, original);
 }
 
 inline HBRUSH WINAPI GetSysColorBrush_Hook(int index) {
     COLORFIX_PROBE_HIT(GetSysColorBrush);
+    if (!colorfix::policy::Active()) return GetSysColorBrush_Original(index);
     if (HBRUSH brush = SemanticBrush(index)) return brush;
     return GetSysColorBrush_Original(index);
 }
 
 inline HGDIOBJ WINAPI GetStockObject_Hook(int object) {
     COLORFIX_PROBE_HIT(GetStockObject);
+    if (!colorfix::policy::Active()) return GetStockObject_Original(object);
     // Only WHITE_BRUSH is treated as a window background. BLACK_BRUSH is used
     // for frames, text and masks: leave it untouched in Phase 1.
     if (object == WHITE_BRUSH)
@@ -97,22 +101,27 @@ inline HGDIOBJ WINAPI GetStockObject_Hook(int object) {
 
 inline COLORREF WINAPI SetTextColor_Hook(HDC dc, COLORREF color) {
     COLORFIX_PROBE_HIT(SetTextColor);
+    if (!colorfix::policy::Active()) return SetTextColor_Original(dc, color);
     return SetTextColor_Original(dc, colorfix::MapLiteralColor(color));
 }
 
 inline COLORREF WINAPI SetBkColor_Hook(HDC dc, COLORREF color) {
     COLORFIX_PROBE_HIT(SetBkColor);
+    if (!colorfix::policy::Active()) return SetBkColor_Original(dc, color);
     return SetBkColor_Original(dc, colorfix::MapLiteralColor(color));
 }
 
 inline HBRUSH WINAPI CreateSolidBrush_Hook(COLORREF color) {
     COLORFIX_PROBE_HIT(CreateSolidBrush);
+    if (!colorfix::policy::Active()) return CreateSolidBrush_Original(color);
     return CreateSolidBrush_Original(colorfix::MapLiteralColor(color));
 }
 
 inline BOOL WINAPI DeleteObject_Hook(HGDIOBJ obj) {
     COLORFIX_PROBE_HIT(DeleteObject);
-    // System/stock brushes must survive DeleteObject; so must ours.
+    // Ownership, not policy: ColorFix brushes must survive even while the
+    // policy is inactive, or a later reactivation would hand out deleted (or
+    // recycled) handles. System/stock brushes behave the same way.
     if (IsColorFixBrush(obj)) return TRUE;
     return DeleteObject_Original(obj);
 }
@@ -159,6 +168,7 @@ inline LRESULT AdjustCtlColor(UINT msg, WPARAM wp, LRESULT result) {
     CtlColorDefault d;
     if (!CtlColorDefaultFor(msg, &d)) return result;
     COLORFIX_PROBE_HIT(DefWindowProcCtlColor);
+    if (!colorfix::policy::Active()) return result;
     if (result != reinterpret_cast<LRESULT>(GetSysColorBrush_Original(d.brush))) return result;
     HBRUSH brush = SemanticBrush(d.brush);
     if (!brush) return result;
@@ -171,9 +181,11 @@ inline LRESULT AdjustCtlColor(UINT msg, WPARAM wp, LRESULT result) {
 }
 
 inline LRESULT WINAPI DefWindowProcW_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    // Counters record interception before the policy gate, as in every hook.
     if (msg == WM_ERASEBKGND) {
         COLORFIX_PROBE_HIT(DefWindowProcErase);
-        if (EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp))) return 1;
+        if (colorfix::policy::Active() && EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp)))
+            return 1;
     }
     return AdjustCtlColor(msg, wp, DefWindowProcW_Original(hwnd, msg, wp, lp));
 }
@@ -181,7 +193,8 @@ inline LRESULT WINAPI DefWindowProcW_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM
 inline LRESULT WINAPI DefWindowProcA_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_ERASEBKGND) {
         COLORFIX_PROBE_HIT(DefWindowProcErase);
-        if (EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp))) return 1;
+        if (colorfix::policy::Active() && EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp)))
+            return 1;
     }
     return AdjustCtlColor(msg, wp, DefWindowProcA_Original(hwnd, msg, wp, lp));
 }
