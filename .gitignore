@@ -1,0 +1,8 @@
+/build/
+/out/
+/.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+generated/*.wh.cpp
