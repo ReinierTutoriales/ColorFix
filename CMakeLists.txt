@@ -24,6 +24,10 @@ include(cmake/minhook_detours.cmake)
 add_executable(mhd_smoke tests/backend/mhd_smoke.cpp)
 target_link_libraries(mhd_smoke PRIVATE minhook_detours user32)
 
+add_executable(colorfix_probe_infra tests/probe/probe_infra.cpp)
+target_compile_definitions(colorfix_probe_infra PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(colorfix_probe_infra PRIVATE user32 gdi32 dwmapi)
+
 add_library(colorfix_core_check OBJECT tests/core_check.cpp)
 target_include_directories(colorfix_core_check PRIVATE "${PROJECT_SOURCE_DIR}/core")
 
