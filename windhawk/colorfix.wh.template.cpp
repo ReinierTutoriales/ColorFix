@@ -8,7 +8,20 @@
 // @architecture    x86-64
 // @architecture    x86
 // @architecture    arm64
+// @compilerOptions -ladvapi32
 // ==/WindhawkMod==
+
+// ==WindhawkModSettings==
+/*
+- mode: followsystem
+  $name: Mode
+  $description: When ColorFix applies dark colors. High Contrast always disables it.
+  $options:
+  - followsystem: Follow the Windows app theme
+  - forcedark: Always dark
+  - disabled: Disabled
+*/
+// ==/WindhawkModSettings==
 
 // @@COLORFIX_CORE@@
 // @@COLORFIX_HOOKS@@
@@ -23,12 +36,39 @@ static bool WindhawkRegisterHook(HMODULE module, const char* name, void* hook,
     return true;
 }
 
+// An unrecognized setting value is treated as Disabled: fail safe, never an
+// invented preference.
+static colorfix::policy::Mode ReadModeSetting() {
+    using colorfix::policy::Mode;
+    Mode mode = Mode::Disabled;
+    if (PCWSTR value = Wh_GetStringSetting(L"mode")) {
+        if (lstrcmpiW(value, L"followsystem") == 0) mode = Mode::FollowSystem;
+        else if (lstrcmpiW(value, L"forcedark") == 0) mode = Mode::ForceDark;
+        else if (lstrcmpiW(value, L"disabled") != 0)
+            Wh_Log(L"ColorFix: unknown mode setting, using disabled");
+        Wh_FreeStringSetting(value);
+    }
+    return mode;
+}
+
 BOOL Wh_ModInit() {
+    const colorfix::policy::Mode mode = ReadModeSetting();
+    // Publish before any hook is applied: nothing turns dark unless the
+    // explicit mode and the real Windows signals say so.
+    if (!colorfix::runtime::RefreshPolicy(mode).signalsOk)
+        Wh_Log(L"ColorFix: reading Windows theme signals failed; staying inactive");
+    if (!colorfix::runtime::StartListener(mode))
+        Wh_Log(L"ColorFix: policy listener failed; theme changes need a restart");
     // Hooks queued during Wh_ModInit are applied by Windhawk after it returns.
     // Wh_ApplyHookOperations is only for hooks queued after initialization.
     return colorfix::hooks::RegisterPhase1Hooks(WindhawkRegisterHook) ? TRUE : FALSE;
 }
 
+void Wh_ModSettingsChanged() {
+    colorfix::runtime::SetMode(ReadModeSetting());
+}
+
 void Wh_ModUninit() {
+    colorfix::runtime::StopListener();
     colorfix::hooks::ShutdownPhase1Hooks();
 }
