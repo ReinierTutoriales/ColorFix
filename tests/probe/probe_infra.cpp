@@ -1,4 +1,4 @@
-// ColorFixProbe — increment 0: capture infrastructure only.
+// ColorFixProbe - increment 0: capture infrastructure only.
 // No hooks, no Common Controls, no ColorFix policy. Answers one question:
 // does PrintWindow return trustworthy pixels on this runner/architecture?
 //
@@ -220,7 +220,7 @@ int main() {
         return 3;
     }
 
-    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName,
+    // WS_POPUP without border: window rect == client rect, so capture\n    // coordinates map 1:1 to client coordinates.\n    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName,
                                 L"ColorFixProbe", WS_POPUP, 100, 100, kWidth, kHeight,
                                 nullptr, nullptr, inst, nullptr);
     if (!hwnd) {
