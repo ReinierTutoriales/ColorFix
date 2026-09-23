@@ -329,7 +329,7 @@ HWND MakeWindow(const wchar_t* cls, char tag, int y, int x = 100) {
 
 int main() {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    std::printf("ColorFixProbe increment 3 - Phase 1 + 1b hooks + WM_CTLCOLOR, no Common Controls\n");
+    std::printf("ColorFixProbe increment 4 - hooks + WM_CTLCOLOR + dynamic policy, no Common Controls\n");
 #if defined(_M_ARM64)
     std::printf("arch: ARM64\n");
 #elif defined(_M_X64) || defined(__x86_64__)
@@ -561,12 +561,96 @@ int main() {
     const WindowShot hookK = Shoot(winK);
     const WindowShot hookC = Shoot(winC);
 
+    // Phase D: dynamic policy. Hooks stay installed; only the effective state
+    // changes. Every surface is compared with the baseline captures (policy
+    // OFF) or the hooked captures (policy ON) taken above, per capture mode.
+    namespace cfp = colorfix::policy;
+    HBRUSH owned = GetSysColorBrush(COLOR_WINDOW);  // ColorFix brush while ON
+    struct PolicyStep {
+        const char* name;
+        cfp::Mode mode;
+        cfp::Signals signals;
+        bool expectOn;
+    };
+    const PolicyStep steps[] = {
+        {"off-disabled", cfp::Mode::Disabled,     {false, false}, false},
+        {"on-forcedark", cfp::Mode::ForceDark,    {false, true},  true},
+        {"hc-veto",      cfp::Mode::ForceDark,    {true,  false}, false},
+        {"follow-light", cfp::Mode::FollowSystem, {false, true},  false},
+        {"follow-dark",  cfp::Mode::FollowSystem, {false, false}, true},
+    };
+    const char* const policyMode[2] = {"flags0", "full"};
+    bool policyOk = true;
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); ++i) {
+        const PolicyStep& st = steps[i];
+        cfp::Publish(st.mode, st.signals);
+        const bool active = cfp::Active();
+        const WindowShot now[3] = {Shoot(winE), Shoot(winK), Shoot(winC)};
+        const WindowShot* base[3] = {&baseE, &baseK, &baseC};
+        const WindowShot* hooked[3] = {&hookE, &hookK, &hookC};
+        int match = 0, total = 0;
+        for (const auto& s : kSurfaces) {
+            const int wi = s.window == 'E' ? 0 : s.window == 'K' ? 1 : 2;
+            const WindowShot& ref = st.expectOn ? *hooked[wi] : *base[wi];
+            for (int m = 0; m < 2; ++m) {
+                COLORREF want = CLR_INVALID, got = CLR_INVALID;
+                const bool captured = !ref.mode[m].px.empty() && !now[wi].mode[m].px.empty();
+                const bool ok = captured && SurfaceColor(ref.mode[m], s.rect, &want) &&
+                                SurfaceColor(now[wi].mode[m], s.rect, &got) && want == got;
+                ++total;
+                if (ok) {
+                    ++match;
+                    continue;
+                }
+                std::printf("detail: policy %s %s %s want=", st.name, s.name, policyMode[m]);
+                PrintRgb(want);
+                std::printf(" got=");
+                PrintRgb(got);
+                std::printf("\n");
+            }
+        }
+        // Interception must continue while OFF: counters sit before the gate.
+        const long erase = now[1].after.v[static_cast<int>(HookId::DefWindowProcErase)] -
+                           now[1].before.v[static_cast<int>(HookId::DefWindowProcErase)];
+        const bool stepOk = active == st.expectOn && match == total && erase > 0;
+        if (!stepOk) policyOk = false;
+        std::printf("policy: %-13s active=%d match=%d/%d K.erase-intercepted=%ld %s\n",
+                    st.name, active ? 1 : 0, match, total, erase, stepOk ? "PASS" : "FAIL");
+
+        if (i == 0) {
+            // Ownership oracle: while OFF, deleting a ColorFix brush must not
+            // destroy it. GetObjectType alone is not proof (increment 1 showed
+            // it still reports deleted handles), so the process GDI object
+            // count must also stay unchanged.
+            HANDLE self = GetCurrentProcess();
+            const long before = static_cast<long>(GetGuiResources(self, GR_GDIOBJECTS));
+            const BOOL ret = DeleteObject(owned);
+            const long gdiDelta = static_cast<long>(GetGuiResources(self, GR_GDIOBJECTS)) - before;
+            const DWORD type = GetObjectType(owned);
+            const COLORREF color = BrushColor(owned);
+            const bool ok = ret && gdiDelta == 0 && type == OBJ_BRUSH && color == expWindow;
+            if (!ok) policyOk = false;
+            std::printf("policy: ownership-off delete=%d gdi=%+ld type=%lu color=", ret, gdiDelta,
+                        static_cast<unsigned long>(type));
+            PrintRgb(color);
+            std::printf(" %s\n", ok ? "PASS" : "FAIL");
+        } else if (i == 1) {
+            // Back ON: the same persistent brush is handed out again.
+            const bool same = GetSysColorBrush(COLOR_WINDOW) == owned;
+            if (!same) policyOk = false;
+            std::printf("policy: ownership-on same-handle=%d %s\n", same ? 1 : 0,
+                        same ? "PASS" : "FAIL");
+        }
+    }
+    cfp::Publish(cfp::Mode::ForceDark, {});
+
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
 
     // ------------------------------------------------------------ report
     bool infraOk = true, behaviorOk = true;
     if (!ctlOk) infraOk = false;  // DeleteObject.pass has no valid control
+    if (!policyOk) behaviorOk = false;
 
     std::printf("\n[autotest]\n");
     for (const auto& t : tests) {
