@@ -1,0 +1,25 @@
+name: apply-increment8
+
+on:
+  push:
+    branches: [increment8-runtime-policy]
+    paths:
+      - tools/increment8.trigger
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Apply exact increment 8 patch
+        run: python tools/apply_increment8.py
+      - name: Push patch commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git push origin HEAD:increment8-runtime-policy
