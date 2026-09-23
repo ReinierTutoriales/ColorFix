@@ -26,4 +26,7 @@ target_include_directories(minhook_detours
   PRIVATE "${_mhd}/phnt"
 )
 target_compile_definitions(minhook_detours PRIVATE UNICODE _UNICODE)
+target_compile_options(minhook_detours PRIVATE
+  $<$<C_COMPILER_ID:MSVC>:/std:clatest>
+)
 target_link_libraries(minhook_detours PUBLIC ntdll)
