@@ -119,8 +119,9 @@ inline HBRUSH WINAPI CreateSolidBrush_Hook(COLORREF color) {
 
 inline BOOL WINAPI DeleteObject_Hook(HGDIOBJ obj) {
     COLORFIX_PROBE_HIT(DeleteObject);
-    if (!colorfix::policy::Active()) return DeleteObject_Original(obj);
-    // System/stock brushes must survive DeleteObject; so must ours.
+    // Ownership, not policy: ColorFix brushes must survive even while the
+    // policy is inactive, or a later reactivation would hand out deleted (or
+    // recycled) handles. System/stock brushes behave the same way.
     if (IsColorFixBrush(obj)) return TRUE;
     return DeleteObject_Original(obj);
 }
@@ -167,6 +168,7 @@ inline LRESULT AdjustCtlColor(UINT msg, WPARAM wp, LRESULT result) {
     CtlColorDefault d;
     if (!CtlColorDefaultFor(msg, &d)) return result;
     COLORFIX_PROBE_HIT(DefWindowProcCtlColor);
+    if (!colorfix::policy::Active()) return result;
     if (result != reinterpret_cast<LRESULT>(GetSysColorBrush_Original(d.brush))) return result;
     HBRUSH brush = SemanticBrush(d.brush);
     if (!brush) return result;
@@ -179,19 +181,20 @@ inline LRESULT AdjustCtlColor(UINT msg, WPARAM wp, LRESULT result) {
 }
 
 inline LRESULT WINAPI DefWindowProcW_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (!colorfix::policy::Active()) return DefWindowProcW_Original(hwnd, msg, wp, lp);
+    // Counters record interception before the policy gate, as in every hook.
     if (msg == WM_ERASEBKGND) {
         COLORFIX_PROBE_HIT(DefWindowProcErase);
-        if (EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp))) return 1;
+        if (colorfix::policy::Active() && EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp)))
+            return 1;
     }
     return AdjustCtlColor(msg, wp, DefWindowProcW_Original(hwnd, msg, wp, lp));
 }
 
 inline LRESULT WINAPI DefWindowProcA_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (!colorfix::policy::Active()) return DefWindowProcA_Original(hwnd, msg, wp, lp);
     if (msg == WM_ERASEBKGND) {
         COLORFIX_PROBE_HIT(DefWindowProcErase);
-        if (EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp))) return 1;
+        if (colorfix::policy::Active() && EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp)))
+            return 1;
     }
     return AdjustCtlColor(msg, wp, DefWindowProcA_Original(hwnd, msg, wp, lp));
 }
