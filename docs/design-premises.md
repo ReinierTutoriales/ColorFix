@@ -154,6 +154,23 @@ Evidence established by the current probes:
   rendering path.
 - The scrollbar observation is informational only; no stronger conclusion is
   established yet.
+- Common Controls v6 (comctl32 6.16, probe increment 5, both load orders):
+  - v6 Static background is covered through `WM_CTLCOLORSTATIC`, early and
+    late, with no cache effect.
+  - v6 Edit background (`FFFFFF`) and v6 push-button face (`FDFDFD`) remain a
+    visual MISS in both orders and after `WM_SYSCOLORCHANGE`, although the
+    `DefWindowProc` ctlcolor detour is observed in that window. This rules
+    out load order and caches; it is consistent with themed (UxTheme)
+    rendering, which the UxTheme increment must confirm.
+  - The v6 ListView background is covered when hooks precede comctl32 v6
+    (early), is a MISS when comctl32 v6 initialized first (late), and becomes
+    covered after `WM_SYSCOLORCHANGE` is sent to the window and its children.
+    Load order matters for comctl32 caches, and the invalidation step in
+    section 5 recovers them. That the refresh goes through the hooked
+    `GetSysColor` is an inference: calls during the invalidation step were
+    not counted.
+  - `comctl32.dll` was absent at process start in every run, so the probe has
+    no static dependency that would blur the early/late distinction.
 
 These results were reproduced by CI on x64, x86, and native ARM64. Increment 3 was squash-merged to `main` as `5cd97a1`; main CI run 48 was reported green on all three architectures.
 
