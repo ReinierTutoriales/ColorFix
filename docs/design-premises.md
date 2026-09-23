@@ -129,6 +129,15 @@ The test may control its runner user's application-theme setting when isolated
 and restore the original setting before exit. Do not mix these policy gates
 into the existing mechanism-coverage verdicts.
 
+### Open debt: policy is not wired to real signals
+
+The policy (modes, High Contrast veto, single atomic effective state) is
+implemented and verified dynamically by probe increment 4, but nothing calls
+`ReadWindowsSignals`/`Publish` yet and no `WM_SETTINGCHANGE` handler exists.
+At runtime ColorFix therefore still behaves as a fixed `ForceDark`. Wiring the
+policy to real signals is a prerequisite for any use of ColorFix outside the
+test environment.
+
 ## 9. Measured rendering boundaries
 
 Evidence established by the current probes:
