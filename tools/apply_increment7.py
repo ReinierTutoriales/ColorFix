@@ -1,15 +1,201 @@
 from pathlib import Path
-import json
 
-EDITS = json.loads(r'''[{"file": "tests/probe/probe_hooks.cpp", "find": "    const bool explicitPaint = tag != 'K' && tag != 'C' && tag != 'V' && tag != 'L';\n", "replace": "    const bool explicitPaint =\n        tag != 'K' && tag != 'C' && tag != 'V' && tag != 'L' && tag != 'T';\n"}, {"file": "tests/probe/probe_hooks.cpp", "find": "    if (SurfaceColor(c, r, &uniform) && uniform == expected) return \"COVERED\";\n    return Luma(*center) >= kDarkThreshold ? \"MISS\" : \"INCONCLUSIVE\";\n}\n", "replace": "    if (SurfaceColor(c, r, &uniform) && uniform == expected) return \"COVERED\";\n    return Luma(*center) >= kDarkThreshold ? \"MISS\" : \"INCONCLUSIVE\";\n}\n\n// ------------------------------------------- increment 7: theme opt-out (T)\n\n// T's controls are 86x76, not V's 90x80, so the size-based UxTheme\n// attribution can tell T's draws from V's.\nconstexpr int kTW = 86, kTH = 76;\n\n// Same classes and styles as V, created under the same v6 activation context.\nbool CreateTChildren(HANDLE actx, HWND t) {\n    ULONG_PTR cookie = 0;\n    if (!ActivateActCtx(actx, &cookie)) return false;\n    HINSTANCE inst = GetModuleHandleW(nullptr);\n    auto child = [&](const wchar_t* cls, DWORD style, int x, int id) {\n        return CreateWindowExW(0, cls, L\"\", WS_CHILD | WS_VISIBLE | style, x, 10, kTW, kTH, t,\n                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), inst,\n                               nullptr) != nullptr;\n    };\n    const bool ok = child(L\"STATIC\", 0, 10, kStaticId) &&\n                    child(L\"EDIT\", WS_BORDER, 110, kEditId) &&\n                    child(L\"BUTTON\", BS_PUSHBUTTON, 210, kButtonId);\n    DeactivateActCtx(0, cookie);\n    return ok;\n}\n\n// Documented API: L\"\" matches no visual-style section (theme off);\n// NULL, NULL removes the association again (theme restored).\nHRESULT ApplyWindowThemeToT(HWND t, LPCWSTR app, LPCWSTR ids) {\n    using SetWindowTheme_t = HRESULT (WINAPI*)(HWND, LPCWSTR, LPCWSTR);\n    const auto fn = reinterpret_cast<SetWindowTheme_t>(reinterpret_cast<void*>(\n        GetProcAddress(GetModuleHandleW(L\"uxtheme.dll\"), \"SetWindowTheme\")));\n    if (!fn) return E_NOTIMPL;\n    HRESULT worst = S_OK;\n    for (int id : {kStaticId, kEditId, kButtonId}) {\n        const HRESULT hr = fn(GetDlgItem(t, id), app, ids);\n        if (FAILED(hr)) worst = hr;\n    }\n    return worst;\n}\n\n// Exact pixel equality over a surface rect: the reversibility oracle compares\n// T against its own themed capture, so no tolerance is needed.\nbool RegionEqual(const Capture& a, const Capture& b, const RECT& r) {\n    if (a.px.empty() || b.px.empty()) return false;\n    for (int y = r.top; y < r.bottom; ++y)\n        for (int x = r.left; x < r.right; ++x)\n            if (At(a, x, y) != At(b, x, y)) return false;\n    return true;\n}\n\n// Telemetry only: UxTheme draws of one class/part at T's control size within\n// a range of observer events.\nlong TDraws(LONG from, LONG to, const wchar_t* klass, int part) {\n    const LONG lo = from < uxo::kMaxEvents ? from : uxo::kMaxEvents;\n    const LONG hi = to < uxo::kMaxEvents ? to : uxo::kMaxEvents;\n    long n = 0;\n    for (LONG i = lo; i < hi; ++i) {\n        const auto& ev = uxo::g_events[i];\n        if (ev.kind == uxo::Event::Kind::Draw && ev.part == part && ev.width == kTW &&\n            ev.height == kTH && std::wcscmp(uxo::ThemeClass(ev.theme), klass) == 0)\n            ++n;\n    }\n    return n;\n}\n"}, {"file": "tests/probe/probe_hooks.cpp", "find": "ColorFixProbe increment 6 - passive UxTheme observation", "replace": "ColorFixProbe increment 7 - UxTheme observation + SetWindowTheme opt-out"}, {"file": "tests/probe/probe_hooks.cpp", "find": "    HWND winL = MakeWindow(wc.lpszClassName, 'L', 560, 100);\n", "replace": "    HWND winL = MakeWindow(wc.lpszClassName, 'L', 560, 100);\n    HWND winT = MakeWindow(wc.lpszClassName, 'T', 560, 450);\n    if (!winT) {\n        std::printf(\"setup: T window failed (%lu)\\n\", GetLastError());\n        return 3;\n    }\n"}, {"file": "tests/probe/probe_hooks.cpp", "find": "        v6Ok = CreateV6Children(v6ctx, winV, winL);\n        Pump(200);\n        baseV = Shoot(winV);\n", "replace": "        v6Ok = CreateV6Children(v6ctx, winV, winL) && CreateTChildren(v6ctx, winT);\n        Pump(200);\n        baseV = Shoot(winV);\n"}, {"file": "tests/probe/probe_hooks.cpp", "find": "        v6Ok = CreateV6Children(v6ctx, winV, winL);\n        Pump(200);\n    }\n    const ComctlState ccAfterLoad", "replace": "        v6Ok = CreateV6Children(v6ctx, winV, winL) && CreateTChildren(v6ctx, winT);\n        Pump(200);\n    }\n    const ComctlState ccAfterLoad"}, {"file": "tests/probe/probe_hooks.cpp", "find": "    const WindowShot hookL = Shoot(winL);\n", "replace": "    const WindowShot hookL = Shoot(winL);\n\n    // Increment 7: T themed -> SetWindowTheme(L\"\", L\"\") -> SetWindowTheme(NULL,\n    // NULL). Observer event indices delimit each phase for the telemetry.\n    const LONG evPre = uxo::g_eventCount;\n    const WindowShot preT = Shoot(winT);\n    const LONG evOff = uxo::g_eventCount;\n    const HRESULT offHr = ApplyWindowThemeToT(winT, L\"\", L\"\");\n    Pump(100);\n    const WindowShot offT = Shoot(winT);\n    const LONG evRestore = uxo::g_eventCount;\n    const HRESULT restoreHr = ApplyWindowThemeToT(winT, nullptr, nullptr);\n    Pump(100);\n    const WindowShot restoredT = Shoot(winT);\n    const LONG evEnd = uxo::g_eventCount;\n"}, {"file": "tests/probe/probe_hooks.cpp", "find": "    std::printf(\"\\n[uxtheme observer]\\n\");\n", "replace": "    // ------------------------------------------- increment 7: theme opt-out\n    std::printf(\"\\n[theme opt-out] T: themed -> SetWindowTheme(L\\\"\\\", L\\\"\\\") -> (NULL, NULL)\\n\");\n    const bool themeCallsOk = SUCCEEDED(offHr) && SUCCEEDED(restoreHr);\n    if (!themeCallsOk) infraOk = false;\n    std::printf(\"themeoff: set-hr=0x%08lX restore-hr=0x%08lX %s\\n\",\n                static_cast<unsigned long>(offHr), static_cast<unsigned long>(restoreHr),\n                themeCallsOk ? \"VALID\" : \"INFRASTRUCTURE_FAILURE\");\n\n    bool tMagenta = true;\n    for (const WindowShot* s : {&preT, &offT, &restoredT}) {\n        for (int m = 0; m < 2; ++m) {\n            COLORREF c = CLR_INVALID;\n            if (s->mode[m].px.empty() || !SurfaceColor(s->mode[m], kMagentaRect, &c) ||\n                c != kMagenta)\n                tMagenta = false;\n        }\n    }\n    if (!tMagenta) infraOk = false;\n    std::printf(\"themeoff: magenta-ctl %s\\n\", tMagenta ? \"VALID\" : \"INFRASTRUCTURE_FAILURE\");\n\n    struct TSurface { const char* name; RECT rect; int role; };\n    const TSurface kTSurfaces[] = {\n        {\"T.static\", {18, 18, 88, 78},   COLOR_3DFACE},\n        {\"T.edit\",   {118, 18, 188, 78}, COLOR_WINDOW},\n        {\"T.button\", {218, 18, 288, 78}, COLOR_3DFACE},\n    };\n    // Visual verdicts are findings, not assertions. Reversibility is a gate:\n    // after (NULL, NULL) each surface must equal T's own themed capture.\n    bool reversible = true;\n    for (const auto& s : kTSurfaces) {\n        const COLORREF expected = s.role == COLOR_WINDOW ? expWindow : exp3dFace;\n        std::printf(\"themeoff: %-8s\", s.name);\n        for (int m = 0; m < 2; ++m) {\n            COLORREF pc, oc, rc;\n            const char* pv = ClassifyV6(preT.mode[m], s.rect, expected, &pc);\n            const char* ov = ClassifyV6(offT.mode[m], s.rect, expected, &oc);\n            const char* rv = ClassifyV6(restoredT.mode[m], s.rect, expected, &rc);\n            for (const char* v : {pv, ov, rv})\n                if (std::strcmp(v, \"INFRASTRUCTURE_FAILURE\") == 0) infraOk = false;\n            const bool same = RegionEqual(preT.mode[m], restoredT.mode[m], s.rect);\n            if (!same) reversible = false;\n            std::printf(\" | %s themed=\", modeName[m]);\n            PrintRgb(pc);\n            std::printf(\" %s off=\", pv);\n            PrintRgb(oc);\n            std::printf(\" %s restored=\", ov);\n            PrintRgb(rc);\n            std::printf(\" %s\", same ? \"SAME\" : \"DIFFERENT\");\n        }\n        std::printf(\"\\n\");\n    }\n    if (!reversible) behaviorOk = false;\n    std::printf(\"themeoff: reversibility %s\\n\", reversible ? \"PASS\" : \"FAIL\");\n\n    const long preEdit = TDraws(evPre, evOff, L\"Edit\", 3);\n    const long offEdit = TDraws(evOff, evRestore, L\"Edit\", 3);\n    const long resEdit = TDraws(evRestore, evEnd, L\"Edit\", 3);\n    const long preBtn = TDraws(evPre, evOff, L\"Button\", 1);\n    const long offBtn = TDraws(evOff, evRestore, L\"Button\", 1);\n    const long resBtn = TDraws(evRestore, evEnd, L\"Button\", 1);\n    // Telemetry is only interpretable if T's themed draws were seen at all.\n    std::printf(\"themeoff: telemetry %dx%d Edit/EP_BACKGROUND pre=%ld off=%ld restored=%ld\"\n                \" Button/BP_PUSHBUTTON pre=%ld off=%ld restored=%ld %s\\n\",\n                kTW, kTH, preEdit, offEdit, resEdit, preBtn, offBtn, resBtn,\n                (preEdit > 0 && preBtn > 0) ? \"INTERPRETABLE\" : \"INCONCLUSIVE\");\n\n    std::printf(\"\\n[uxtheme observer]\\n\");\n"}, {"file": "tests/probe/probe_hooks.cpp", "find": "    DestroyWindow(winL);\n", "replace": "    DestroyWindow(winL);\n    DestroyWindow(winT);\n"}]''')
-path = Path("tests/probe/probe_hooks.cpp")
-text = path.read_text(encoding="utf-8")
-for i, edit in enumerate(EDITS, 1):
-    old = edit["find"]
-    new = edit["replace"]
+EDITS = [
+    (r"""    const bool explicitPaint = tag != 'K' && tag != 'C' && tag != 'V' && tag != 'L';
+""", r"""    const bool explicitPaint =
+        tag != 'K' && tag != 'C' && tag != 'V' && tag != 'L' && tag != 'T';
+"""),
+    (r"""    if (SurfaceColor(c, r, &uniform) && uniform == expected) return "COVERED";
+    return Luma(*center) >= kDarkThreshold ? "MISS" : "INCONCLUSIVE";
+}
+""", r"""    if (SurfaceColor(c, r, &uniform) && uniform == expected) return "COVERED";
+    return Luma(*center) >= kDarkThreshold ? "MISS" : "INCONCLUSIVE";
+}
+
+// ------------------------------------------- increment 7: theme opt-out (T)
+
+// T's controls are 86x76, not V's 90x80, so the size-based UxTheme
+// attribution can tell T's draws from V's.
+constexpr int kTW = 86, kTH = 76;
+
+// Same classes and styles as V, created under the same v6 activation context.
+bool CreateTChildren(HANDLE actx, HWND t) {
+    ULONG_PTR cookie = 0;
+    if (!ActivateActCtx(actx, &cookie)) return false;
+    HINSTANCE inst = GetModuleHandleW(nullptr);
+    auto child = [&](const wchar_t* cls, DWORD style, int x, int id) {
+        return CreateWindowExW(0, cls, L"", WS_CHILD | WS_VISIBLE | style, x, 10, kTW, kTH, t,
+                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), inst,
+                               nullptr) != nullptr;
+    };
+    const bool ok = child(L"STATIC", 0, 10, kStaticId) &&
+                    child(L"EDIT", WS_BORDER, 110, kEditId) &&
+                    child(L"BUTTON", BS_PUSHBUTTON, 210, kButtonId);
+    DeactivateActCtx(0, cookie);
+    return ok;
+}
+
+// Documented API: L"" matches no visual-style section (theme off);
+// NULL, NULL removes the association again (theme restored).
+HRESULT ApplyWindowThemeToT(HWND t, LPCWSTR app, LPCWSTR ids) {
+    using SetWindowTheme_t = HRESULT (WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+    const auto fn = reinterpret_cast<SetWindowTheme_t>(reinterpret_cast<void*>(
+        GetProcAddress(GetModuleHandleW(L"uxtheme.dll"), "SetWindowTheme")));
+    if (!fn) return E_NOTIMPL;
+    HRESULT worst = S_OK;
+    for (int id : {kStaticId, kEditId, kButtonId}) {
+        const HRESULT hr = fn(GetDlgItem(t, id), app, ids);
+        if (FAILED(hr)) worst = hr;
+    }
+    return worst;
+}
+
+// Exact pixel equality over a surface rect: the reversibility oracle compares
+// T against its own themed capture, so no tolerance is needed.
+bool RegionEqual(const Capture& a, const Capture& b, const RECT& r) {
+    if (a.px.empty() || b.px.empty()) return false;
+    for (int y = r.top; y < r.bottom; ++y)
+        for (int x = r.left; x < r.right; ++x)
+            if (At(a, x, y) != At(b, x, y)) return false;
+    return true;
+}
+
+// Telemetry only: UxTheme draws of one class/part at T's control size within
+// a range of observer events.
+long TDraws(LONG from, LONG to, const wchar_t* klass, int part) {
+    const LONG lo = from < uxo::kMaxEvents ? from : uxo::kMaxEvents;
+    const LONG hi = to < uxo::kMaxEvents ? to : uxo::kMaxEvents;
+    long n = 0;
+    for (LONG i = lo; i < hi; ++i) {
+        const auto& ev = uxo::g_events[i];
+        if (ev.kind == uxo::Event::Kind::Draw && ev.part == part && ev.width == kTW &&
+            ev.height == kTH && std::wcscmp(uxo::ThemeClass(ev.theme), klass) == 0)
+            ++n;
+    }
+    return n;
+}
+"""),
+    (r"""ColorFixProbe increment 6 - passive UxTheme observation""", r"""ColorFixProbe increment 7 - UxTheme observation + SetWindowTheme opt-out"""),
+    (r"""    HWND winL = MakeWindow(wc.lpszClassName, 'L', 560, 100);
+""", r"""    HWND winL = MakeWindow(wc.lpszClassName, 'L', 560, 100);
+    HWND winT = MakeWindow(wc.lpszClassName, 'T', 560, 450);
+    if (!winT) {
+        std::printf("setup: T window failed (%lu)\n", GetLastError());
+        return 3;
+    }
+"""),
+    (r"""        v6Ok = CreateV6Children(v6ctx, winV, winL);
+        Pump(200);
+        baseV = Shoot(winV);
+""", r"""        v6Ok = CreateV6Children(v6ctx, winV, winL) && CreateTChildren(v6ctx, winT);
+        Pump(200);
+        baseV = Shoot(winV);
+"""),
+    (r"""        v6Ok = CreateV6Children(v6ctx, winV, winL);
+        Pump(200);
+    }
+    const ComctlState ccAfterLoad""", r"""        v6Ok = CreateV6Children(v6ctx, winV, winL) && CreateTChildren(v6ctx, winT);
+        Pump(200);
+    }
+    const ComctlState ccAfterLoad"""),
+    (r"""    const WindowShot hookL = Shoot(winL);
+""", r"""    const WindowShot hookL = Shoot(winL);
+
+    // Increment 7: T themed -> SetWindowTheme(L"", L"") -> SetWindowTheme(NULL,
+    // NULL). Observer event indices delimit each phase for the telemetry.
+    const LONG evPre = uxo::g_eventCount;
+    const WindowShot preT = Shoot(winT);
+    const LONG evOff = uxo::g_eventCount;
+    const HRESULT offHr = ApplyWindowThemeToT(winT, L"", L"");
+    Pump(100);
+    const WindowShot offT = Shoot(winT);
+    const LONG evRestore = uxo::g_eventCount;
+    const HRESULT restoreHr = ApplyWindowThemeToT(winT, nullptr, nullptr);
+    Pump(100);
+    const WindowShot restoredT = Shoot(winT);
+    const LONG evEnd = uxo::g_eventCount;
+"""),
+    (r"""    std::printf("\n[uxtheme observer]\n");
+""", r"""    // ------------------------------------------- increment 7: theme opt-out
+    std::printf("\n[theme opt-out] T: themed -> SetWindowTheme(L\"\", L\"\") -> (NULL, NULL)\n");
+    const bool themeCallsOk = SUCCEEDED(offHr) && SUCCEEDED(restoreHr);
+    if (!themeCallsOk) infraOk = false;
+    std::printf("themeoff: set-hr=0x%08lX restore-hr=0x%08lX %s\n",
+                static_cast<unsigned long>(offHr), static_cast<unsigned long>(restoreHr),
+                themeCallsOk ? "VALID" : "INFRASTRUCTURE_FAILURE");
+
+    bool tMagenta = true;
+    for (const WindowShot* s : {&preT, &offT, &restoredT}) {
+        for (int m = 0; m < 2; ++m) {
+            COLORREF c = CLR_INVALID;
+            if (s->mode[m].px.empty() || !SurfaceColor(s->mode[m], kMagentaRect, &c) ||
+                c != kMagenta)
+                tMagenta = false;
+        }
+    }
+    if (!tMagenta) infraOk = false;
+    std::printf("themeoff: magenta-ctl %s\n", tMagenta ? "VALID" : "INFRASTRUCTURE_FAILURE");
+
+    struct TSurface { const char* name; RECT rect; int role; };
+    const TSurface kTSurfaces[] = {
+        {"T.static", {18, 18, 88, 78},   COLOR_3DFACE},
+        {"T.edit",   {118, 18, 188, 78}, COLOR_WINDOW},
+        {"T.button", {218, 18, 288, 78}, COLOR_3DFACE},
+    };
+    // Visual verdicts are findings, not assertions. Reversibility is a gate:
+    // after (NULL, NULL) each surface must equal T's own themed capture.
+    bool reversible = true;
+    for (const auto& s : kTSurfaces) {
+        const COLORREF expected = s.role == COLOR_WINDOW ? expWindow : exp3dFace;
+        std::printf("themeoff: %-8s", s.name);
+        for (int m = 0; m < 2; ++m) {
+            COLORREF pc, oc, rc;
+            const char* pv = ClassifyV6(preT.mode[m], s.rect, expected, &pc);
+            const char* ov = ClassifyV6(offT.mode[m], s.rect, expected, &oc);
+            const char* rv = ClassifyV6(restoredT.mode[m], s.rect, expected, &rc);
+            for (const char* v : {pv, ov, rv})
+                if (std::strcmp(v, "INFRASTRUCTURE_FAILURE") == 0) infraOk = false;
+            const bool same = RegionEqual(preT.mode[m], restoredT.mode[m], s.rect);
+            if (!same) reversible = false;
+            std::printf(" | %s themed=", modeName[m]);
+            PrintRgb(pc);
+            std::printf(" %s off=", pv);
+            PrintRgb(oc);
+            std::printf(" %s restored=", ov);
+            PrintRgb(rc);
+            std::printf(" %s", same ? "SAME" : "DIFFERENT");
+        }
+        std::printf("\n");
+    }
+    if (!reversible) behaviorOk = false;
+    std::printf("themeoff: reversibility %s\n", reversible ? "PASS" : "FAIL");
+
+    const long preEdit = TDraws(evPre, evOff, L"Edit", 3);
+    const long offEdit = TDraws(evOff, evRestore, L"Edit", 3);
+    const long resEdit = TDraws(evRestore, evEnd, L"Edit", 3);
+    const long preBtn = TDraws(evPre, evOff, L"Button", 1);
+    const long offBtn = TDraws(evOff, evRestore, L"Button", 1);
+    const long resBtn = TDraws(evRestore, evEnd, L"Button", 1);
+    // Telemetry is only interpretable if T's themed draws were seen at all.
+    std::printf("themeoff: telemetry %dx%d Edit/EP_BACKGROUND pre=%ld off=%ld restored=%ld"
+                " Button/BP_PUSHBUTTON pre=%ld off=%ld restored=%ld %s\n",
+                kTW, kTH, preEdit, offEdit, resEdit, preBtn, offBtn, resBtn,
+                (preEdit > 0 && preBtn > 0) ? "INTERPRETABLE" : "INCONCLUSIVE");
+
+    std::printf("\n[uxtheme observer]\n");
+"""),
+    (r"""    DestroyWindow(winL);
+""", r"""    DestroyWindow(winL);
+    DestroyWindow(winT);
+"""),
+]
+
+path = Path('tests/probe/probe_hooks.cpp')
+text = path.read_text(encoding='utf-8')
+for i, (old, new) in enumerate(EDITS, 1):
     count = text.count(old)
     if count != 1:
-        raise SystemExit(f"edit {i}: expected exactly one match, found {count}")
+        raise SystemExit(f'edit {i}: expected exactly one match, found {count}; old={old!r}')
     text = text.replace(old, new, 1)
-path.write_text(text, encoding="utf-8")
-print(f"applied {len(EDITS)} edits to {path}")
+path.write_text(text, encoding='utf-8')
+print(f'applied {len(EDITS)} edits to {path}')
