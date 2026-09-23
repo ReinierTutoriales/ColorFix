@@ -67,7 +67,7 @@ jobs:
               'autotests' = '^(threshold|expect|autotest|detail):'
               'surfaces'  = '^(surface|scenario):'
               'v6'        = '^(comctl32|v6|v6scenario):'
-              'uxtheme'   = '^uxtheme:'
+              'uxtheme'   = '^(uxtheme|themeoff):'
             }
             foreach ($g in $groups.GetEnumerator()) {
               $lines = $out | Select-String $g.Value | ForEach-Object { $_.Line }
