@@ -57,7 +57,7 @@ void Paint(HDC dc) {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_ERASEBKGND:
-        return 1;
+        return 1;  // Paint() covers the whole client area
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
@@ -65,7 +65,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         EndPaint(hwnd, &ps);
         return 0;
     }
-    case WM_PRINTCLIENT:
+    case WM_PRINTCLIENT:  // PrintWindow(flags=0) may route here
         Paint(reinterpret_cast<HDC>(wp));
         return 0;
     }
@@ -85,7 +85,7 @@ const char* ArchName() {
 }
 
 void ReportEnvironment() {
-    std::printf("ColorFixProbe increment 0 — capture infrastructure\n");
+    std::printf("ColorFixProbe increment 0 - capture infrastructure\n");
     std::printf("arch: %s\n", ArchName());
 
     using RtlGetVersion_t = LONG (WINAPI*)(OSVERSIONINFOW*);
@@ -117,7 +117,7 @@ void ReportEnvironment() {
 struct CaptureResult {
     BOOL printOk = FALSE;
     DWORD lastError = 0;
-    std::vector<std::uint32_t> pixels;
+    std::vector<std::uint32_t> pixels;  // top-down BGRA
 };
 
 CaptureResult Capture(HWND hwnd, UINT flags) {
@@ -125,7 +125,7 @@ CaptureResult Capture(HWND hwnd, UINT flags) {
     BITMAPINFO bi{};
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bi.bmiHeader.biWidth = kWidth;
-    bi.bmiHeader.biHeight = -kHeight;
+    bi.bmiHeader.biHeight = -kHeight;  // top-down
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
@@ -220,14 +220,15 @@ int main() {
         return 3;
     }
 
-    // WS_POPUP without border: window rect == client rect, so capture\n    // coordinates map 1:1 to client coordinates.\n    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName,
+    // WS_POPUP without border: window rect == client rect, so capture
+    // coordinates map 1:1 to client coordinates.
+    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, wc.lpszClassName,
                                 L"ColorFixProbe", WS_POPUP, 100, 100, kWidth, kHeight,
                                 nullptr, nullptr, inst, nullptr);
     if (!hwnd) {
         std::printf("setup: CreateWindowExW failed (%lu)\n", GetLastError());
         return 3;
     }
-
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
     UpdateWindow(hwnd);
 
