@@ -28,6 +28,7 @@
 
 #include "MinHook.h"
 #include "colorfix_hooks.hpp"
+#include "uxtheme_observer.hpp"
 
 #ifndef PW_RENDERFULLCONTENT
 #define PW_RENDERFULLCONTENT 0x00000002
@@ -36,6 +37,7 @@
 namespace {
 
 namespace cfh = colorfix::hooks;
+namespace uxo = colorfix::probe::uxtheme_observer;
 using cfh::HookId;
 
 constexpr int kWidth = 320;
@@ -290,6 +292,8 @@ void PrintRgb(COLORREF c) {
     std::printf("%02X%02X%02X", GetRValue(c), GetGValue(c), GetBValue(c));
 }
 
+std::vector<void*> g_colorfixTargets;
+
 bool RegisterWithMinHook(HMODULE module, const char* name, void* hook, void** original) {
     void* target = reinterpret_cast<void*>(GetProcAddress(module, name));
     if (!target) {
@@ -300,6 +304,18 @@ bool RegisterWithMinHook(HMODULE module, const char* name, void* hook, void** or
     if (s != MH_OK) {
         std::printf("setup: MH_CreateHook(%s) = %s\n", name, MH_StatusToString(s));
         return false;
+    }
+    g_colorfixTargets.push_back(target);
+    return true;
+}
+
+bool EnableColorFixHooks() {
+    for (void* target : g_colorfixTargets) {
+        const MH_STATUS s = MH_EnableHook(target);
+        if (s != MH_OK) {
+            std::printf("setup: MH_EnableHook(ColorFix target) = %s\n", MH_StatusToString(s));
+            return false;
+        }
     }
     return true;
 }
@@ -479,7 +495,7 @@ int main(int argc, char** argv) {
         }
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    std::printf("ColorFixProbe increment 5 - hooks + WM_CTLCOLOR + policy + Common Controls v6\n");
+    std::printf("ColorFixProbe increment 6 - passive UxTheme observation\n");
 #if defined(_M_ARM64)
     std::printf("arch: ARM64\n");
 #elif defined(_M_X64) || defined(__x86_64__)
@@ -530,9 +546,12 @@ int main(int argc, char** argv) {
     PrintRgb(kWhite); std::printf("->"); PrintRgb(expLiteral);
     std::printf("\n");
 
-    // Phase A: baseline. Hooks created but NOT enabled.
+    // Phase A: initialize MinHook once. UxTheme observation is enabled now,
+    // before any v6 child exists in either order. ColorFix hooks are only
+    // created here and remain disabled until the early/late split below.
     MH_STATUS st = MH_Initialize();
     if (st != MH_OK) { std::printf("setup: MH_Initialize = %s\n", MH_StatusToString(st)); return 1; }
+    if (!uxo::Install(winV, winL)) return 1;
     if (!cfh::RegisterPhase1Hooks(RegisterWithMinHook)) return 1;
 
     const WindowShot baseE = Shoot(winE);
@@ -569,9 +588,9 @@ int main(int argc, char** argv) {
     std::printf("detail: DeleteObject.control(no hooks) ret=%d created=%+ld final=%+ld %s\n",
                 ctl.ret, ctl.createdDelta, ctl.finalDelta, ctlOk ? "OK" : "FAILED");
 
-    // Phase B: enable hooks, autotest each one with a direct call.
-    st = MH_EnableHook(MH_ALL_HOOKS);
-    if (st != MH_OK) { std::printf("setup: MH_EnableHook = %s\n", MH_StatusToString(st)); return 1; }
+    // Phase B: enable only ColorFix targets. The passive UxTheme observer has
+    // already been live since before V/L child creation.
+    if (!EnableColorFixHooks()) return 1;
 
     // Order "early": hooks are live before comctl32 v6 is first loaded.
     if (!late) {
@@ -749,6 +768,31 @@ int main(int argc, char** argv) {
         afterL = Shoot(winL);
     }
 
+    // Increment-5 pixel oracle: observation must not change the established
+    // rendering result. Exact colors intentionally make observer passivity an
+    // infrastructure invariant rather than a new rendering expectation.
+    auto shotHas = [](const WindowShot& shot, const RECT& r, COLORREF expected) {
+        for (int m = 0; m < 2; ++m) {
+            COLORREF c = CLR_INVALID;
+            if (shot.mode[m].px.empty() || !SurfaceColor(shot.mode[m], r, &c) || c != expected)
+                return false;
+        }
+        return true;
+    };
+    const bool observerAutotest = uxo::Autotest();
+    bool observerPassive =
+        shotHas(hookV, kV6Surfaces[0].rect, exp3dFace) &&
+        shotHas(hookV, kV6Surfaces[1].rect, RGB(255, 255, 255)) &&
+        shotHas(hookV, kV6Surfaces[2].rect, RGB(253, 253, 253));
+    if (late) {
+        observerPassive = observerPassive &&
+            shotHas(hookL, kV6Surfaces[3].rect, RGB(255, 255, 255)) &&
+            shotHas(afterL, kV6Surfaces[3].rect, expWindow);
+    } else {
+        observerPassive = observerPassive &&
+            shotHas(hookL, kV6Surfaces[3].rect, expWindow);
+    }
+
     // Phase D: dynamic policy. Hooks stay installed; only the effective state
     // changes. Every surface is compared with the baseline captures (policy
     // OFF) or the hooked captures (policy ON) taken above, per capture mode.
@@ -838,6 +882,7 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------ report
     bool infraOk = true, behaviorOk = true;
     if (!ctlOk) infraOk = false;  // DeleteObject.pass has no valid control
+    if (!observerAutotest || !observerPassive) infraOk = false;
     if (!policyOk) behaviorOk = false;
 
     std::printf("\n[autotest]\n");
@@ -1012,6 +1057,11 @@ int main(int argc, char** argv) {
         }
         std::printf("\n");
     }
+
+    std::printf("\n[uxtheme observer]\n");
+    std::printf("uxtheme: passive-pixels %s\n",
+                observerPassive ? "VALID" : "INFRASTRUCTURE_FAILURE");
+    uxo::PrintReport();
 
     const int code = !infraOk ? 1 : !behaviorOk ? 2 : 0;
     std::printf("\nsummary: infrastructure=%s hooks=%s exit=%d\n",

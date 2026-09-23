@@ -50,7 +50,7 @@ jobs:
         shell: pwsh
         run: |
           # Two processes: comctl32 v6 cannot be unloaded, so each order needs
-          # its own. 2 orders x 4 groups = 8 notices (GitHub allows 10 per step).
+          # its own. 2 orders x 5 groups = 10 notices (GitHub's per-step limit).
           $final = 0
           foreach ($order in @('early', 'late')) {
             $out = & "build\${{ matrix.preset }}\colorfix_probe_hooks.exe" "--order=$order" 2>&1
@@ -67,6 +67,7 @@ jobs:
               'autotests' = '^(threshold|expect|autotest|detail):'
               'surfaces'  = '^(surface|scenario):'
               'v6'        = '^(comctl32|v6|v6scenario):'
+              'uxtheme'   = '^uxtheme:'
             }
             foreach ($g in $groups.GetEnumerator()) {
               $lines = $out | Select-String $g.Value | ForEach-Object { $_.Line }
