@@ -1,0 +1,28 @@
+name: apply-increment5
+
+on:
+  push:
+    branches: [probe-common-controls-v6]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Apply exact increment 5 edits
+        run: python tools/apply_increment5.py
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tests/probe/probe_hooks.cpp .github/workflows/ci.yml docs/design-premises.md
+          git commit -m 'test(probe): add Common Controls v6 early-late axis'
+          git push origin HEAD:probe-common-controls-v6
