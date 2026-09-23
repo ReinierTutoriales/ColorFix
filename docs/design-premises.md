@@ -192,6 +192,30 @@ Evidence established by the current probes:
     was installed and is logged with an unknown class (property 2425,
     `TMT_TEXTGLOWSIZE`). It is counted, not dropped, and does not affect the
     Edit/Button findings.
+- Theme opt-out (probe increment 7, `SetWindowTheme`, both load orders,
+  x64/x86/ARM64):
+  - `SetWindowTheme(hwnd, L"", L"")` suppresses the observed 86x76 UxTheme
+    draws for both the v6 Edit (`Edit`/`EP_BACKGROUND`) and v6 push button
+    (`Button`/`BP_PUSHBUTTON`); restoring with `SetWindowTheme(hwnd, NULL,
+    NULL)` makes those draws reappear.
+  - The v6 Edit changes from themed `FFFFFF` MISS to `202020` COVERED while
+    opted out, then returns exactly to `FFFFFF` after theme restoration.
+    This demonstrates that the documented per-window theme opt-out is
+    sufficient to expose the Edit to ColorFix's already-covered non-themed
+    rendering path in the measured configuration.
+  - The v6 push-button face changes from themed `FDFDFD` MISS to classic
+    `F0F0F0` MISS while opted out, then returns exactly to `FDFDFD`. Theme
+    opt-out therefore changes its rendering path but does not cover the button
+    face; the separate classic-button boundary remains.
+  - Static remains `2D2D2D` COVERED throughout themed, opted-out, and restored
+    phases.
+  - Exact pixel reversibility passed for every measured T surface in both
+    capture modes. `SetWindowTheme` and restoration both returned `S_OK`, the
+    T magenta sentinel remained valid, and the passive observer lost no events.
+  - The 86x76 telemetry was interpretable in every run: Edit and Button draws
+    were present before opt-out, absent during opt-out, and present again after
+    restoration. This establishes the transition for the probe controls, not a
+    product-wide policy for when theme opt-out should be applied.
 
 These results were reproduced by CI on x64, x86, and native ARM64. Increment 3 was squash-merged to `main` as `5cd97a1`; main CI run 48 was reported green on all three architectures.
 
