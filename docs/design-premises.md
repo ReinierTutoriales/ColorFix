@@ -415,7 +415,9 @@ and Static-control characterization. All six processes in run 238 ended with
   - Increment 9e rejected a blanket DrawThemeText-scoped bypass. Checkbox and
     radio labels changed from `202020:DCDCDC` (582 text pixels, contrast
     11.9) to black text on `202020` (contrast 1.3); group-box text showed
-    the same regression, with 694 `DCDCDC` pixels in the mapped capture.
+    the same regression, with 694 `DCDCDC` pixels in the mapped capture (582
+    glyph pixels plus, most likely, part of the frame inside the measured area;
+    inferred).
   - Increment 9f measured the narrower rule: bypass literal SetTextColor
     mapping only inside DrawThemeText/DrawThemeTextEx for a known single-class
     `Button` HTHEME and part 1 (`BP_PUSHBUTTON`). Push NORMAL and PRESSED
@@ -447,6 +449,10 @@ and Static-control characterization. All six processes in run 238 ended with
     keep the ordinary ColorFix literal mapping rather than applying the
     push-button bypass. Handles opened before the product can observe their
     class are therefore not guessed.
+  - The themed push button is now legible but not dark: its face stays
+    `FDFDFD`/`CCE4F7`. Darkening it (theme opt-out, candidate (b)) remains a
+    separate, unmeasured product decision because preserving application-owned
+    `SetWindowTheme` state is unresolved.
 
 Increment 9e/9f evidence: experimental runs 261 and 263 established the scoped
 decision table and shared-HTHEME/refcount requirement. Product evidence: pull
