@@ -16,13 +16,15 @@ using SetBkColor_t       = COLORREF (WINAPI*)(HDC, COLORREF);
 using CreateSolidBrush_t = HBRUSH   (WINAPI*)(COLORREF);
 using DeleteObject_t     = BOOL     (WINAPI*)(HGDIOBJ);
 using DefWindowProc_t    = LRESULT  (WINAPI*)(HWND, UINT, WPARAM, LPARAM);
+using FillRect_t         = int      (WINAPI*)(HDC, const RECT*, HBRUSH);
 
 // Probe-only call counters. Compiled out unless COLORFIX_PROBE is defined, so
 // the Windhawk mod and future ColorFix.dll carry no instrumentation.
 #if defined(COLORFIX_PROBE)
 enum class HookId : int {
     GetSysColor, GetSysColorBrush, GetStockObject, SetTextColor,
-    SetBkColor, CreateSolidBrush, DeleteObject, DefWindowProcErase, DefWindowProcCtlColor, Count
+    SetBkColor, CreateSolidBrush, DeleteObject, DefWindowProcErase, DefWindowProcCtlColor,
+    FillRect, Count
 };
 inline std::atomic<long> g_probeCalls[static_cast<int>(HookId::Count)];
 #define COLORFIX_PROBE_HIT(id) \
@@ -30,6 +32,18 @@ inline std::atomic<long> g_probeCalls[static_cast<int>(HookId::Count)];
         .fetch_add(1, std::memory_order_relaxed)
 #else
 #define COLORFIX_PROBE_HIT(id) ((void)0)
+#endif
+
+#if defined(COLORFIX_PROBE)
+// Probe-only FillRect telemetry and tap. The tap sees the caller's brush
+// before the product decision and returns the brush to continue with; the
+// 9a/9b button-face observer uses it instead of a second MinHook detour on
+// user32!FillRect, which the product hook already owns.
+using FillRectTap_t = HBRUSH (*)(HDC, const RECT*, HBRUSH);
+inline std::atomic<FillRectTap_t> g_probeFillRectTap{nullptr};
+inline std::atomic<long> g_fillRectSubstituted{0};   // product substitutions
+inline std::atomic<long> g_fillRectPseudo{0};        // COLOR_x + 1 values seen
+inline std::atomic<unsigned long> g_fillRectPseudoMask{0};  // bit x = COLOR_x
 #endif
 
 inline GetSysColor_t      GetSysColor_Original;
@@ -41,11 +55,43 @@ inline CreateSolidBrush_t CreateSolidBrush_Original;
 inline DeleteObject_t     DeleteObject_Original;
 inline DefWindowProc_t    DefWindowProcW_Original;
 inline DefWindowProc_t    DefWindowProcA_Original;
+inline FillRect_t         FillRect_Original;
 
 // One process-lifetime brush per system color index, derived from core roles.
 // COLOR_MENUBAR (30) is the highest defined index.
 inline constexpr int kSysColorCount = COLOR_MENUBAR + 1;
 inline std::atomic<HBRUSH> g_brushes[kSysColorCount];
+
+// Identity cache of the system color brush handles, one per index. Filled
+// before any hook exists (RegisterPhase1Hooks), never inside a detour. Whether
+// an index is remapped is decided by SemanticBrush at the call, so the cache
+// holds identities only and does not depend on the current colors.
+inline std::atomic<HBRUSH> g_sysBrushes[kSysColorCount];
+
+// Returns the number of non-null handles cached.
+inline int FillSystemBrushCache(GetSysColorBrush_t source) {
+    int cached = 0;
+    for (int i = 0; i < kSysColorCount; ++i) {
+        HBRUSH brush = source ? source(i) : nullptr;
+        g_sysBrushes[i].store(brush, std::memory_order_release);
+        if (brush) ++cached;
+    }
+    return cached;
+}
+
+// Rebuild from the unhooked GetSysColorBrush. Not called by the runtime:
+// system brush handles are expected to be stable (measured by the probe).
+inline int RefreshSystemBrushCache() {
+    return FillSystemBrushCache(GetSysColorBrush_Original);
+}
+
+// Index whose original system brush handle is exactly `brush`, or -1.
+inline int SystemBrushIndex(HBRUSH brush) {
+    if (!brush) return -1;
+    for (int i = 0; i < kSysColorCount; ++i)
+        if (g_sysBrushes[i].load(std::memory_order_acquire) == brush) return i;
+    return -1;
+}
 
 inline bool IsColorFixBrush(HGDIOBJ obj) {
     if (!obj) return false;
@@ -199,11 +245,44 @@ inline LRESULT WINAPI DefWindowProcA_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM
     return AdjustCtlColor(msg, wp, DefWindowProcA_Original(hwnd, msg, wp, lp));
 }
 
+// Phase 1c: classic fills with an original system brush handle. USER32 paints
+// the classic button face with FillRect(GetSysColorBrush(COLOR_BTNFACE)) from
+// an internal path (probe 9a/9b), so the hooked GetSysColorBrush never runs.
+// Only handles in the identity cache whose role is remapped are replaced.
+// COLOR_x + 1 values and any other brush pass through unchanged.
+inline int WINAPI FillRect_Hook(HDC dc, const RECT* rc, HBRUSH brush) {
+    COLORFIX_PROBE_HIT(FillRect);
+    const ULONG_PTR value = reinterpret_cast<ULONG_PTR>(brush);
+    const bool pseudo = value > 0 && value <= static_cast<ULONG_PTR>(kSysColorCount);
+#if defined(COLORFIX_PROBE)
+    if (pseudo) {
+        g_fillRectPseudo.fetch_add(1, std::memory_order_relaxed);
+        g_fillRectPseudoMask.fetch_or(1ul << (value - 1), std::memory_order_relaxed);
+    }
+    if (const FillRectTap_t tap = g_probeFillRectTap.load(std::memory_order_acquire))
+        brush = tap(dc, rc, brush);
+#endif
+    if (!brush || pseudo || !colorfix::policy::Active()) return FillRect_Original(dc, rc, brush);
+    const int index = SystemBrushIndex(brush);
+    if (index >= 0) {
+        if (HBRUSH semantic = SemanticBrush(index)) {
+#if defined(COLORFIX_PROBE)
+            g_fillRectSubstituted.fetch_add(1, std::memory_order_relaxed);
+#endif
+            return FillRect_Original(dc, rc, semantic);
+        }
+    }
+    return FillRect_Original(dc, rc, brush);
+}
+
 template <typename RegisterHook>
 inline bool RegisterPhase1Hooks(RegisterHook&& registerHook) {
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     HMODULE gdi32  = GetModuleHandleW(L"gdi32.dll");
     if (!user32 || !gdi32) return false;
+
+    // Identity cache from the exports before any hook is queued or applied.
+    if (FillSystemBrushCache(&::GetSysColorBrush) == 0) return false;
 
     bool ok = true;
     ok &= registerHook(user32, "GetSysColor",      reinterpret_cast<void*>(GetSysColor_Hook),      reinterpret_cast<void**>(&GetSysColor_Original));
@@ -215,6 +294,7 @@ inline bool RegisterPhase1Hooks(RegisterHook&& registerHook) {
     ok &= registerHook(gdi32,  "DeleteObject",     reinterpret_cast<void*>(DeleteObject_Hook),     reinterpret_cast<void**>(&DeleteObject_Original));
     ok &= registerHook(user32, "DefWindowProcW",   reinterpret_cast<void*>(DefWindowProcW_Hook),   reinterpret_cast<void**>(&DefWindowProcW_Original));
     ok &= registerHook(user32, "DefWindowProcA",   reinterpret_cast<void*>(DefWindowProcA_Hook),   reinterpret_cast<void**>(&DefWindowProcA_Original));
+    ok &= registerHook(user32, "FillRect",         reinterpret_cast<void*>(FillRect_Hook),         reinterpret_cast<void**>(&FillRect_Original));
     return ok;
 }
 

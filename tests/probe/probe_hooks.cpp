@@ -240,9 +240,11 @@ void Pump(DWORD ms) {
 constexpr const char* kHookNames[] = {
     "GetSysColor", "GetSysColorBrush", "GetStockObject", "SetTextColor",
     "SetBkColor", "CreateSolidBrush", "DeleteObject", "DefWindowProcErase",
-    "DefWindowProcCtlColor",
+    "DefWindowProcCtlColor", "FillRect",
 };
 constexpr int kHookCount = static_cast<int>(HookId::Count);
+static_assert(sizeof(kHookNames) / sizeof(kHookNames[0]) == kHookCount,
+              "kHookNames must name every HookId");
 
 struct Counts { long v[kHookCount]; };
 
@@ -561,7 +563,7 @@ int main(int argc, char** argv) {
         }
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    std::printf("ColorFixProbe increment 9b (measure) - FillRect brush identity\n");
+    std::printf("ColorFixProbe increment 9b - FillRect system brush identity (classic face)\n");
 #if defined(_M_ARM64)
     std::printf("arch: ARM64\n");
 #elif defined(_M_X64) || defined(__x86_64__)
@@ -836,6 +838,131 @@ int main(int argc, char** argv) {
     }
     DeleteDC(testDc);
 
+    // Increment 9b: product FillRect hook. Each case fills a 4x4 memory DIB
+    // preset to a sentinel through the hooked FillRect and reads the center.
+    // Brushes that must stay untouched are created or fetched through the
+    // ColorFix originals, so no other hook decides the input.
+    namespace cfp9 = colorfix::policy;
+    auto fillCenter = [](HBRUSH brush) {
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = 4;
+        bi.bmiHeader.biHeight = -4;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HBITMAP dib = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HDC dc = CreateCompatibleDC(nullptr);
+        COLORREF out = CLR_INVALID;
+        if (dib && dc && bits) {
+            const HGDIOBJ old = SelectObject(dc, dib);
+            auto* px = static_cast<std::uint32_t*>(bits);
+            for (int i = 0; i < 16; ++i) px[i] = 0x00010203;  // kSentinel RGB(1, 2, 3)
+            const RECT r{0, 0, 4, 4};
+            FillRect(dc, &r, brush);
+            GdiFlush();
+            const std::uint32_t v = px[2 * 4 + 2];
+            out = RGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+            SelectObject(dc, old);
+        }
+        if (dc) DeleteDC(dc);
+        if (dib) DeleteObject(dib);
+        return out;
+    };
+    const COLORREF origFace = static_cast<COLORREF>(cfh::GetSysColor_Original(COLOR_BTNFACE));
+    const COLORREF origHighlight =
+        static_cast<COLORREF>(cfh::GetSysColor_Original(COLOR_HIGHLIGHT));
+    const HBRUSH sysFace = cfh::GetSysColorBrush_Original(COLOR_BTNFACE);
+    const HBRUSH sysHighlight = cfh::GetSysColorBrush_Original(COLOR_HIGHLIGHT);
+    std::printf("detail: FillRect.inputs face=%p highlight=%p unmapped-role=%d\n",
+                static_cast<void*>(sysFace), static_cast<void*>(sysHighlight),
+                colorfix::MapSystemColor(COLOR_HIGHLIGHT, origHighlight) == origHighlight ? 1 : 0);
+    struct FillCase {
+        const char* name;
+        HBRUSH brush;
+        cfp9::Signals signals;  // published with ForceDark for this case
+        COLORREF expected;
+        long substitutions;     // expected product substitutions
+        long pseudo;            // expected COLOR_x + 1 observations
+        bool colorGate;         // false: the pixel is a finding, not an assertion
+    };
+    HBRUSH sameColor = cfh::CreateSolidBrush_Original(origFace);
+    const cfp9::Signals sigOn = initial.signals;
+    // FillRect.pseudo: the product must pass COLOR_x + 1 through untouched; the
+    // resulting pixel depends on how USER32 resolves the index internally, so
+    // it is reported, not asserted. FillRect.null expects the sentinel intact.
+    const FillCase fillCases[] = {
+        {"FillRect.sys-on",    sysFace,      sigOn,         exp3dFace,     1, 0, true},
+        {"FillRect.sys-off",   sysFace,      sigOn,         origFace,      0, 0, true},
+        {"FillRect.hc-veto",   sysFace,      {true, false}, origFace,      0, 0, true},
+        {"FillRect.samecolor", sameColor,    sigOn,         origFace,      0, 0, true},
+        {"FillRect.unmapped",  sysHighlight, sigOn,         origHighlight, 0, 0, true},
+        {"FillRect.stock", static_cast<HBRUSH>(cfh::GetStockObject_Original(WHITE_BRUSH)),
+                                             sigOn,         kWhite,        0, 0, true},
+        {"FillRect.semantic",  cfh::SemanticBrush(COLOR_BTNFACE),
+                                             sigOn,         exp3dFace,     0, 0, true},
+        {"FillRect.pseudo", reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1)),
+                                             sigOn,         origFace,      0, 1, false},
+        {"FillRect.null",      nullptr,      sigOn,         kSentinel,     0, 0, true},
+    };
+    for (const auto& fc : fillCases) {
+        run(fc.name, HookId::FillRect, [&](Autotest& t) {
+            const bool off = std::strcmp(fc.name, "FillRect.sys-off") == 0;
+            cfp9::Publish(off ? cfp9::Mode::Disabled : cfp9::Mode::ForceDark, fc.signals);
+            const long sub0 = cfh::g_fillRectSubstituted.load();
+            const long ps0 = cfh::g_fillRectPseudo.load();
+            t.expected = fc.expected;
+            t.observed = fillCenter(fc.brush);
+            const long sub = cfh::g_fillRectSubstituted.load() - sub0;
+            const long ps = cfh::g_fillRectPseudo.load() - ps0;
+            t.valueOk = (!fc.colorGate || t.observed == t.expected) &&
+                        sub == fc.substitutions && ps == fc.pseudo;
+            if (!t.valueOk || !fc.colorGate)
+                std::printf("detail: %s substitutions=%ld pseudo=%ld color-gate=%d\n", fc.name,
+                            sub, ps, fc.colorGate ? 1 : 0);
+        });
+    }
+    cfp9::Publish(cfp9::Mode::ForceDark, initial.signals);  // back to the run's state
+    DeleteObject(sameColor);
+
+    // Identity cache: filled from the exports before any hook existed, it must
+    // equal the ColorFix originals now, and a rebuild must not change it.
+    HBRUSH cacheAtStart[cfh::kSysColorCount];
+    int cacheMatch = 0, cacheCount = 0;
+    for (int i = 0; i < cfh::kSysColorCount; ++i) {
+        cacheAtStart[i] = cfh::g_sysBrushes[i].load();
+        if (cacheAtStart[i]) ++cacheCount;
+        if (cacheAtStart[i] == cfh::GetSysColorBrush_Original(i)) ++cacheMatch;
+    }
+    // Shared handles would make the first index win in SystemBrushIndex.
+    int cacheDistinct = 0;
+    for (int i = 0; i < cfh::kSysColorCount; ++i) {
+        if (!cacheAtStart[i]) continue;
+        bool seen = false;
+        for (int j = 0; j < i && !seen; ++j) seen = cacheAtStart[j] == cacheAtStart[i];
+        if (!seen) ++cacheDistinct;
+    }
+    const int rebuilt = cfh::RefreshSystemBrushCache();
+    int rebuildSame = 0;
+    for (int i = 0; i < cfh::kSysColorCount; ++i)
+        if (cfh::g_sysBrushes[i].load() == cacheAtStart[i]) ++rebuildSame;
+    {
+        Autotest t{"FillRect.cache", 0, false, CLR_INVALID, CLR_INVALID};
+        t.expectNoCall = true;  // identity check only: no fill
+        t.valueOk = cacheCount > 0 && cacheMatch == cfh::kSysColorCount &&
+                    rebuilt == cacheCount && rebuildSame == cfh::kSysColorCount;
+        tests.push_back(t);
+        std::printf("detail: FillRect.cache handles=%d distinct=%d original-match=%d/%d "
+                    "rebuild=%d same=%d/%d\n",
+                    cacheCount, cacheDistinct, cacheMatch, cfh::kSysColorCount, rebuilt,
+                    rebuildSame, cfh::kSysColorCount);
+    }
+    // Scene telemetry starts here: autotest observations are excluded.
+    const long fillSub0 = cfh::g_fillRectSubstituted.load();
+    const long fillPseudo0 = cfh::g_fillRectPseudo.load();
+    cfh::g_fillRectPseudoMask.store(0);
+
     // Phase C: hooked capture.
     const WindowShot hookE = Shoot(winE);
     const WindowShot hookK = Shoot(winK);
@@ -888,6 +1015,20 @@ int main(int argc, char** argv) {
     } else {
         observerPassive = observerPassive &&
             shotHas(hookL, kV6Surfaces[3].rect, expWindow);
+    }
+    if (!observerPassive) {
+        // 9b: the FillRect product hook is also in this pixel chain; name the
+        // surface that moved so the failure is not attributed blindly.
+        std::printf("detail: v6-pixels");
+        for (const auto& s : kV6Surfaces) {
+            const WindowShot& h = s.window == 'V' ? hookV : hookL;
+            std::printf(" %s=", s.name);
+            PrintRgb(h.mode[0].px.empty()
+                         ? CLR_INVALID
+                         : At(h.mode[0], (s.rect.left + s.rect.right) / 2,
+                              (s.rect.top + s.rect.bottom) / 2));
+        }
+        std::printf("\n");
     }
 
     // Phase D: dynamic policy. Hooks stay installed; only the effective state
@@ -985,8 +1126,11 @@ int main(int argc, char** argv) {
     InterlockedExchange(&uxo::g_paused, 1);
     bfo::g_setBkColorRaw = cfh::SetBkColor_Original;
     bfo::g_createBrushRaw = cfh::CreateSolidBrush_Original;
+    bfo::g_fillRectRaw = cfh::FillRect_Original;
     const bool bfInstalled = bfo::Install();
     if (!bfInstalled) bfInfra = false;
+    // FillRect candidate: tap inside the product hook (single owner of the target).
+    if (bfInstalled) cfh::g_probeFillRectTap.store(&bfo::FillRectTap);
     uxo::g_drawIntercept = &bfo::DrawThemeIntercept;
     bool bfCandidateOk[bfo::kCandidates] = {};
     for (int c = 0; bfInstalled && c < bfo::kCandidates; ++c) {
@@ -1161,6 +1305,7 @@ int main(int argc, char** argv) {
 
     for (const auto& t : bfTargets) bfo::Unsubclass(t.button);
     uxo::g_drawIntercept = nullptr;
+    cfh::g_probeFillRectTap.store(nullptr);
     bfo::Uninstall();
     InterlockedExchange(&uxo::g_paused, 0);
 
@@ -1221,6 +1366,7 @@ int main(int argc, char** argv) {
                 static_cast<void*>(baseSysBrush));
 
     const char* modeName[2] = {"flags0", "full"};
+    bool gateC = true;
     std::printf("\n[surfaces]\n");
     for (const auto& s : kSurfaces) {
         const WindowShot& b = s.window == 'E' ? baseE : s.window == 'K' ? baseK : baseC;
@@ -1275,6 +1421,11 @@ int main(int argc, char** argv) {
             } else {
                 verdict = "UNEXPECTED";
             }
+            // 9b gate: the classic C face must be COVERED in both capture modes.
+            if (s.kind == Surface::CtlButton && std::strcmp(verdict, "COVERED") != 0) {
+                gateC = false;
+                if (std::strcmp(verdict, "INFRASTRUCTURE_FAILURE") != 0) behaviorOk = false;
+            }
             std::printf(" | %s ", modeName[m]);
             PrintRgb(bc); std::printf("->"); PrintRgb(hc);
             std::printf(" %s", verdict);
@@ -1282,6 +1433,7 @@ int main(int argc, char** argv) {
         }
         std::printf("\n");
     }
+    std::printf("surface: gate-9b C.button-face %s\n", gateC ? "PASS" : "FAIL");
 
     std::printf("\n[scenario counters] hooked repaint+capture, per window\n");
     for (char w : {'E', 'K', 'C'}) {
@@ -1403,6 +1555,7 @@ int main(int argc, char** argv) {
     // Visual verdicts are findings, not assertions. Reversibility is a gate:
     // after (NULL, NULL) each surface must equal T's own themed capture.
     bool reversible = true;
+    bool gateT = true;
     for (const auto& s : kTSurfaces) {
         const COLORREF expected = s.role == COLOR_WINDOW ? expWindow : exp3dFace;
         std::printf("themeoff: %-8s", s.name);
@@ -1415,6 +1568,11 @@ int main(int argc, char** argv) {
                 if (std::strcmp(v, "INFRASTRUCTURE_FAILURE") == 0) infraOk = false;
             const bool same = RegionEqual(preT.mode[m], restoredT.mode[m], s.rect);
             if (!same) reversible = false;
+            // 9b gate: the opted-out (classic) T face must be COVERED.
+            if (std::strcmp(s.name, "T.button") == 0 && std::strcmp(ov, "COVERED") != 0) {
+                gateT = false;
+                if (std::strcmp(ov, "INFRASTRUCTURE_FAILURE") != 0) behaviorOk = false;
+            }
             std::printf(" | %s themed=", modeName[m]);
             PrintRgb(pc);
             std::printf(" %s off=", pv);
@@ -1427,6 +1585,7 @@ int main(int argc, char** argv) {
     }
     if (!reversible) behaviorOk = false;
     std::printf("themeoff: reversibility %s\n", reversible ? "PASS" : "FAIL");
+    std::printf("themeoff: gate-9b T-off.button %s\n", gateT ? "PASS" : "FAIL");
 
     const long preEdit = TDraws(evPre, evOff, L"Edit", 3);
     const long offEdit = TDraws(evOff, evRestore, L"Edit", 3);
@@ -1543,6 +1702,21 @@ int main(int argc, char** argv) {
     std::printf("runtime: restore AppsUseLightTheme=%s %s\n",
                 origStatus == ERROR_SUCCESS ? (origLight ? "1" : "0") : "absent",
                 restored == ERROR_SUCCESS ? "OK" : "INFRASTRUCTURE_FAILURE");
+
+    // 9b premise: system brush handles are stable, so the identity cache needs
+    // no runtime refresh. A finding, not a gate: a change invalidates the
+    // premise and is handled in a later increment.
+    int stableCache = 0, stableOrig = 0;
+    for (int i = 0; i < cfh::kSysColorCount; ++i) {
+        if (cfh::g_sysBrushes[i].load() == cacheAtStart[i]) ++stableCache;
+        if (cfh::GetSysColorBrush_Original(i) == cacheAtStart[i]) ++stableOrig;
+    }
+    std::printf("runtime: sysbrush-identity cache=%d/%d original=%d/%d %s\n", stableCache,
+                cfh::kSysColorCount, stableOrig, cfh::kSysColorCount,
+                stableOrig == cfh::kSysColorCount ? "PREMISE_HOLDS" : "PREMISE_BROKEN");
+    std::printf("runtime: fillrect scenes substitutions=%ld pseudo=%ld pseudo-mask=%08lX\n",
+                cfh::g_fillRectSubstituted.load() - fillSub0,
+                cfh::g_fillRectPseudo.load() - fillPseudo0, cfh::g_fillRectPseudoMask.load());
 
     // Phase E must run with the same installed hooks it is validating. Tear
     // MinHook down only after the listener has stopped and the runner setting
