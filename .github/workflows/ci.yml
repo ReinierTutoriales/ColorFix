@@ -66,8 +66,8 @@ jobs:
               'result'    = '^(arch|order|summary|policy|runtime|buttonface):'
               'autotests' = '^(threshold|expect|autotest|detail):'
               'surfaces'  = '^(surface|scenario):'
-              'v6'        = '^(comctl32|v6|v6scenario|buttontext):'
-              'uxtheme'   = '^(uxtheme|themeoff):'
+              'v6'        = '^(comctl32|v6|v6scenario|buttontext: (detail|gate-9c|classic|themed|optout)):'
+              'uxtheme'   = '^(uxtheme|themeoff|buttontext: (9d|product|infrastructure)):'
             }
             foreach ($g in $groups.GetEnumerator()) {
               $lines = $out | Select-String $g.Value | ForEach-Object { $_.Line }

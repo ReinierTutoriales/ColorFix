@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <cwchar>
 #include <windows.h>
+#include <uxtheme.h>
 
 #include "colorfix_mapper.hpp"
 #include "colorfix_policy.hpp"
@@ -17,6 +19,12 @@ using CreateSolidBrush_t = HBRUSH   (WINAPI*)(COLORREF);
 using DeleteObject_t     = BOOL     (WINAPI*)(HGDIOBJ);
 using DefWindowProc_t    = LRESULT  (WINAPI*)(HWND, UINT, WPARAM, LPARAM);
 using FillRect_t         = int      (WINAPI*)(HDC, const RECT*, HBRUSH);
+using OpenThemeData_t     = HTHEME   (WINAPI*)(HWND, LPCWSTR);
+using OpenThemeDataForDpi_t = HTHEME (WINAPI*)(HWND, LPCWSTR, UINT);
+using OpenThemeDataEx_t   = HTHEME   (WINAPI*)(HWND, LPCWSTR, DWORD);
+using CloseThemeData_t    = HRESULT  (WINAPI*)(HTHEME);
+using DrawThemeText_t     = HRESULT  (WINAPI*)(HTHEME, HDC, int, int, LPCWSTR, int, DWORD, DWORD, const RECT*);
+using DrawThemeTextEx_t   = HRESULT  (WINAPI*)(HTHEME, HDC, int, int, LPCWSTR, int, DWORD, RECT*, const DTTOPTS*);
 
 // Probe-only call counters. Compiled out unless COLORFIX_PROBE is defined, so
 // the Windhawk mod and future ColorFix.dll carry no instrumentation.
@@ -35,6 +43,12 @@ inline std::atomic<long> g_probeCalls[static_cast<int>(HookId::Count)];
 #endif
 
 #if defined(COLORFIX_PROBE)
+using ThemeOpenTap_t = void (*)(HTHEME, LPCWSTR);
+using ThemeCloseTap_t = void (*)(HTHEME, HRESULT);
+using ThemeTextTap_t = void (*)(HTHEME, int, bool);
+inline std::atomic<ThemeOpenTap_t> g_probeThemeOpenTap{nullptr};
+inline std::atomic<ThemeCloseTap_t> g_probeThemeCloseTap{nullptr};
+inline std::atomic<ThemeTextTap_t> g_probeThemeTextTap{nullptr};
 // Probe-only FillRect telemetry and tap. The tap sees the caller's brush
 // before the product decision and returns the brush to continue with; the
 // 9a/9b button-face observer uses it instead of a second MinHook detour on
@@ -58,6 +72,167 @@ inline DeleteObject_t     DeleteObject_Original;
 inline DefWindowProc_t    DefWindowProcW_Original;
 inline DefWindowProc_t    DefWindowProcA_Original;
 inline FillRect_t         FillRect_Original;
+inline OpenThemeData_t     OpenThemeData_Original;
+inline OpenThemeDataForDpi_t OpenThemeDataForDpi_Original;
+inline OpenThemeDataEx_t   OpenThemeDataEx_Original;
+inline CloseThemeData_t    CloseThemeData_Original;
+inline DrawThemeText_t     DrawThemeText_Original;
+inline DrawThemeTextEx_t   DrawThemeTextEx_Original;
+
+struct ThemeMapEntry {
+    std::atomic<HTHEME> theme{nullptr};
+    wchar_t klass[48]{};
+    std::atomic<long> refs{0};
+};
+inline constexpr int kThemeMapCapacity = 64;
+inline ThemeMapEntry g_themeMap[kThemeMapCapacity];
+inline std::atomic_flag g_themeMapLock = ATOMIC_FLAG_INIT;
+inline std::atomic<int> g_uxthemeHooks{0};  // 0 unavailable/off, 1 complete
+
+struct ThemeMapGuard {
+    ThemeMapGuard() { while (g_themeMapLock.test_and_set(std::memory_order_acquire)) YieldProcessor(); }
+    ~ThemeMapGuard() { g_themeMapLock.clear(std::memory_order_release); }
+};
+
+inline const wchar_t* SingleThemeClass(LPCWSTR klass) {
+    if (!klass || !*klass || wcschr(klass, L';')) return nullptr;
+    const wchar_t* prefix = wcsstr(klass, L"::");
+    if (prefix && wcsstr(prefix + 2, L"::")) return nullptr;
+    return prefix ? prefix + 2 : klass;
+}
+
+inline bool IsButtonThemeClass(LPCWSTR klass) {
+    const wchar_t* single = SingleThemeClass(klass);
+    return single && _wcsicmp(single, L"Button") == 0;
+}
+
+inline bool RememberTheme(HTHEME theme, LPCWSTR klass) {
+    if (!theme || !IsButtonThemeClass(klass)) return false;
+    ThemeMapGuard guard;
+    ThemeMapEntry* empty = nullptr;
+    for (auto& entry : g_themeMap) {
+        if (entry.theme.load(std::memory_order_relaxed) == theme) {
+            entry.refs.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        if (!empty && !entry.theme.load(std::memory_order_relaxed)) empty = &entry;
+    }
+    if (!empty) return false;
+    lstrcpynW(empty->klass, L"Button", static_cast<int>(_countof(empty->klass)));
+    empty->refs.store(1, std::memory_order_relaxed);
+    empty->theme.store(theme, std::memory_order_release);
+    return true;
+}
+
+inline bool ReleaseTheme(HTHEME theme) {
+    if (!theme) return false;
+    ThemeMapGuard guard;
+    for (auto& entry : g_themeMap) {
+        if (entry.theme.load(std::memory_order_relaxed) != theme) continue;
+        const long refs = entry.refs.load(std::memory_order_relaxed);
+        if (refs <= 0) {
+            entry.theme.store(nullptr, std::memory_order_release);
+            entry.klass[0] = L'\0';
+            return false;
+        }
+        if (refs == 1) {
+            entry.refs.store(0, std::memory_order_relaxed);
+            entry.theme.store(nullptr, std::memory_order_release);
+            entry.klass[0] = L'\0';
+        } else {
+            entry.refs.store(refs - 1, std::memory_order_relaxed);
+        }
+        return true;
+    }
+    return false;
+}
+
+inline bool KnownButtonTheme(HTHEME theme) {
+    if (!theme) return false;
+    ThemeMapGuard guard;
+    for (auto& entry : g_themeMap)
+        if (entry.theme.load(std::memory_order_relaxed) == theme)
+            return _wcsicmp(entry.klass, L"Button") == 0;
+    return false;
+}
+
+struct ThemeTextContext { HTHEME theme = nullptr; int part = 0; };
+inline constexpr int kThemeTextDepth = 8;
+inline thread_local ThemeTextContext t_themeText[kThemeTextDepth];
+inline thread_local int t_themeTextDepth = 0;
+
+inline ThemeTextContext CurrentThemeText() {
+    if (t_themeTextDepth <= 0 || t_themeTextDepth > kThemeTextDepth) return {};
+    return t_themeText[t_themeTextDepth - 1];
+}
+
+struct ThemeTextScope {
+    bool stored = false;
+    ThemeTextScope(HTHEME theme, int part) {
+        if (t_themeTextDepth < kThemeTextDepth) {
+            t_themeText[t_themeTextDepth] = {theme, part};
+            stored = true;
+        }
+        ++t_themeTextDepth;
+    }
+    ~ThemeTextScope() {
+        --t_themeTextDepth;
+        if (stored) t_themeText[t_themeTextDepth] = {};
+    }
+};
+
+inline HTHEME WINAPI OpenThemeData_Hook(HWND hwnd, LPCWSTR klass) {
+    HTHEME theme = OpenThemeData_Original(hwnd, klass);
+    if (g_uxthemeHooks.load(std::memory_order_acquire)) RememberTheme(theme, klass);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeOpenTap.load(std::memory_order_acquire)) tap(theme, klass);
+#endif
+    return theme;
+}
+inline HTHEME WINAPI OpenThemeDataForDpi_Hook(HWND hwnd, LPCWSTR klass, UINT dpi) {
+    HTHEME theme = OpenThemeDataForDpi_Original(hwnd, klass, dpi);
+    if (g_uxthemeHooks.load(std::memory_order_acquire)) RememberTheme(theme, klass);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeOpenTap.load(std::memory_order_acquire)) tap(theme, klass);
+#endif
+    return theme;
+}
+inline HTHEME WINAPI OpenThemeDataEx_Hook(HWND hwnd, LPCWSTR klass, DWORD flags) {
+    HTHEME theme = OpenThemeDataEx_Original(hwnd, klass, flags);
+    if (g_uxthemeHooks.load(std::memory_order_acquire)) RememberTheme(theme, klass);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeOpenTap.load(std::memory_order_acquire)) tap(theme, klass);
+#endif
+    return theme;
+}
+inline HRESULT WINAPI CloseThemeData_Hook(HTHEME theme) {
+    const HRESULT hr = CloseThemeData_Original(theme);
+    if (SUCCEEDED(hr) && g_uxthemeHooks.load(std::memory_order_acquire)) ReleaseTheme(theme);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeCloseTap.load(std::memory_order_acquire)) tap(theme, hr);
+#endif
+    return hr;
+}
+inline HRESULT WINAPI DrawThemeText_Hook(HTHEME theme, HDC dc, int part, int state,
+                                         LPCWSTR text, int count, DWORD flags,
+                                         DWORD flags2, const RECT* rc) {
+    ThemeTextScope scope(g_uxthemeHooks.load(std::memory_order_acquire) ? theme : nullptr, part);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeTextTap.load(std::memory_order_acquire))
+        tap(theme, part, KnownButtonTheme(theme));
+#endif
+    return DrawThemeText_Original(theme, dc, part, state, text, count, flags, flags2, rc);
+}
+inline HRESULT WINAPI DrawThemeTextEx_Hook(HTHEME theme, HDC dc, int part, int state,
+                                           LPCWSTR text, int count, DWORD flags,
+                                           RECT* rc, const DTTOPTS* opts) {
+    ThemeTextScope scope(g_uxthemeHooks.load(std::memory_order_acquire) ? theme : nullptr, part);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeTextTap.load(std::memory_order_acquire))
+        tap(theme, part, KnownButtonTheme(theme));
+#endif
+    return DrawThemeTextEx_Original(theme, dc, part, state, text, count, flags, rc, opts);
+}
 
 // One process-lifetime brush per system color index, derived from core roles.
 // COLOR_MENUBAR (30) is the highest defined index.
@@ -151,6 +326,8 @@ inline COLORREF WINAPI SetTextColor_Hook(HDC dc, COLORREF color) {
     COLORFIX_PROBE_HIT(SetTextColor);
     if (!colorfix::policy::Active()) return SetTextColor_Original(dc, color);
     COLORREF mapped = colorfix::MapLiteralColor(color);
+    const ThemeTextContext text = CurrentThemeText();
+    if (text.part == 1 && KnownButtonTheme(text.theme)) mapped = color;
 #if defined(COLORFIX_PROBE)
     if (const SetTextColorTap_t tap = g_probeSetTextColorTap.load(std::memory_order_acquire))
         mapped = tap(dc, color, mapped);
@@ -286,6 +463,7 @@ template <typename RegisterHook>
 inline bool RegisterPhase1Hooks(RegisterHook&& registerHook) {
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     HMODULE gdi32  = GetModuleHandleW(L"gdi32.dll");
+    HMODULE uxtheme = GetModuleHandleW(L"uxtheme.dll");
     if (!user32 || !gdi32) return false;
 
     // Identity cache from the exports before any hook is queued or applied.
@@ -302,6 +480,26 @@ inline bool RegisterPhase1Hooks(RegisterHook&& registerHook) {
     ok &= registerHook(user32, "DefWindowProcW",   reinterpret_cast<void*>(DefWindowProcW_Hook),   reinterpret_cast<void**>(&DefWindowProcW_Original));
     ok &= registerHook(user32, "DefWindowProcA",   reinterpret_cast<void*>(DefWindowProcA_Hook),   reinterpret_cast<void**>(&DefWindowProcA_Original));
     ok &= registerHook(user32, "FillRect",         reinterpret_cast<void*>(FillRect_Hook),         reinterpret_cast<void**>(&FillRect_Original));
+    if (uxtheme) {
+        const char* names[] = {"OpenThemeData", "OpenThemeDataForDpi", "OpenThemeDataEx",
+                               "CloseThemeData", "DrawThemeText", "DrawThemeTextEx"};
+        void* targets[_countof(names)]{};
+        bool complete = true;
+        for (size_t i = 0; i < _countof(names); ++i) {
+            targets[i] = reinterpret_cast<void*>(GetProcAddress(uxtheme, names[i]));
+            complete &= targets[i] != nullptr;
+        }
+        if (complete) {
+            bool uxOk = true;
+            uxOk &= registerHook(uxtheme, names[0], reinterpret_cast<void*>(OpenThemeData_Hook), reinterpret_cast<void**>(&OpenThemeData_Original));
+            uxOk &= registerHook(uxtheme, names[1], reinterpret_cast<void*>(OpenThemeDataForDpi_Hook), reinterpret_cast<void**>(&OpenThemeDataForDpi_Original));
+            uxOk &= registerHook(uxtheme, names[2], reinterpret_cast<void*>(OpenThemeDataEx_Hook), reinterpret_cast<void**>(&OpenThemeDataEx_Original));
+            uxOk &= registerHook(uxtheme, names[3], reinterpret_cast<void*>(CloseThemeData_Hook), reinterpret_cast<void**>(&CloseThemeData_Original));
+            uxOk &= registerHook(uxtheme, names[4], reinterpret_cast<void*>(DrawThemeText_Hook), reinterpret_cast<void**>(&DrawThemeText_Original));
+            uxOk &= registerHook(uxtheme, names[5], reinterpret_cast<void*>(DrawThemeTextEx_Hook), reinterpret_cast<void**>(&DrawThemeTextEx_Original));
+            g_uxthemeHooks.store(uxOk ? 1 : 0, std::memory_order_release);
+        }
+    }
     return ok;
 }
 

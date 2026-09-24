@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include "MinHook.h"
+#include "colorfix_hooks.hpp"
 
 namespace colorfix::probe::uxtheme_observer {
 
@@ -37,7 +38,7 @@ struct ThemeMap {
 };
 
 inline constexpr int kMaxThemes = 64;
-inline constexpr int kMaxEvents = 512;
+inline constexpr int kMaxEvents = 2048;
 inline ThemeMap g_themes[kMaxThemes]{};
 inline Event g_events[kMaxEvents]{};
 inline volatile LONG g_themeCount = 0;
@@ -53,7 +54,7 @@ inline HWND g_l = nullptr;
 
 // Increment 9a. While paused, the observer keeps the HTHEME -> class map but
 // neither counts nor records events, so the historical report and the
-// 512-event buffer are untouched. g_drawIntercept (null by default: fully
+// fixed event buffer are untouched. g_drawIntercept (null by default: fully
 // passive) lets the causal experiment replace one DrawThemeBackground call.
 inline volatile LONG g_paused = 0;
 using DrawIntercept_t = bool (*)(const wchar_t* klass, HDC dc, int part, int state,
@@ -78,7 +79,7 @@ inline DrawThemeBackgroundEx_t g_drawExOrig = nullptr;
 inline GetThemeColor_t g_colorOrig = nullptr;
 inline DrawThemeText_t g_textOrig = nullptr;
 inline DrawThemeTextEx_t g_textExOrig = nullptr;
-inline void* g_targets[7]{};
+inline void* g_targets[3]{};
 
 inline void CopyClass(wchar_t* dst, size_t n, LPCWSTR src) noexcept {
     if (!dst || n == 0) return;
@@ -172,18 +173,15 @@ inline void Record(Event::Kind kind, HTHEME theme, int part, int state, int prop
     }
 }
 
-inline HTHEME WINAPI OpenThemeData_Hook(HWND hwnd, LPCWSTR klass) {
-    HTHEME h = g_openOrig(hwnd, klass);
+inline void ProductThemeOpenTap(HTHEME h, LPCWSTR klass) {
     if (!g_paused) InterlockedIncrement(&g_open);
     RecordTheme(h, klass);
-    return h;
 }
 
-inline HTHEME WINAPI OpenThemeDataForDpi_Hook(HWND hwnd, LPCWSTR klass, UINT dpi) {
-    HTHEME h = g_openDpiOrig(hwnd, klass, dpi);
-    if (!g_paused) InterlockedIncrement(&g_openForDpi);
-    RecordTheme(h, klass);
-    return h;
+inline void ProductThemeTextTap(HTHEME, int, bool) {
+    ++t_drawThemeTextDepth;
+    --t_drawThemeTextDepth;
+    InterlockedIncrement(&g_text);
 }
 
 inline HRESULT WINAPI DrawThemeBackground_Hook(HTHEME theme, HDC dc, int part, int state,
@@ -215,21 +213,6 @@ inline HRESULT WINAPI GetThemeColor_Hook(HTHEME theme, int part, int state, int 
     return hr;
 }
 
-inline HRESULT WINAPI DrawThemeText_Hook(HTHEME theme, HDC dc, int part, int state, LPCWSTR text, int count, DWORD flags, DWORD flags2, const RECT* rect) {
-    ++t_drawThemeTextDepth;
-    const HRESULT hr = g_textOrig(theme, dc, part, state, text, count, flags, flags2, rect);
-    --t_drawThemeTextDepth;
-    InterlockedIncrement(&g_text);
-    return hr;
-}
-
-inline HRESULT WINAPI DrawThemeTextEx_Hook(HTHEME theme, HDC dc, int part, int state, LPCWSTR text, int count, DWORD flags, LPRECT rect, const DTTOPTS* opts) {
-    ++t_drawThemeTextDepth;
-    const HRESULT hr = g_textExOrig(theme, dc, part, state, text, count, flags, rect, opts);
-    --t_drawThemeTextDepth;
-    InterlockedIncrement(&g_textEx);
-    return hr;
-}
 
 inline bool CreateAndEnable(HMODULE ux, const char* name, void* hook, void** original,
                             void** targetOut) {
@@ -260,20 +243,14 @@ inline bool Install(HWND v, HWND l) {
         std::printf("setup: LoadLibraryW(uxtheme.dll) failed (%lu)\n", GetLastError());
         return false;
     }
-    return CreateAndEnable(ux, "OpenThemeData", reinterpret_cast<void*>(&OpenThemeData_Hook),
-                           reinterpret_cast<void**>(&g_openOrig), &g_targets[0]) &&
-           CreateAndEnable(ux, "OpenThemeDataForDpi", reinterpret_cast<void*>(&OpenThemeDataForDpi_Hook),
-                           reinterpret_cast<void**>(&g_openDpiOrig), &g_targets[1]) &&
-           CreateAndEnable(ux, "DrawThemeBackground", reinterpret_cast<void*>(&DrawThemeBackground_Hook),
-                           reinterpret_cast<void**>(&g_drawOrig), &g_targets[2]) &&
+    colorfix::hooks::g_probeThemeOpenTap.store(&ProductThemeOpenTap);
+    colorfix::hooks::g_probeThemeTextTap.store(&ProductThemeTextTap);
+    return CreateAndEnable(ux, "DrawThemeBackground", reinterpret_cast<void*>(&DrawThemeBackground_Hook),
+                           reinterpret_cast<void**>(&g_drawOrig), &g_targets[0]) &&
            CreateAndEnable(ux, "DrawThemeBackgroundEx", reinterpret_cast<void*>(&DrawThemeBackgroundEx_Hook),
-                           reinterpret_cast<void**>(&g_drawExOrig), &g_targets[3]) &&
+                           reinterpret_cast<void**>(&g_drawExOrig), &g_targets[1]) &&
            CreateAndEnable(ux, "GetThemeColor", reinterpret_cast<void*>(&GetThemeColor_Hook),
-                           reinterpret_cast<void**>(&g_colorOrig), &g_targets[4]) &&
-           CreateAndEnable(ux, "DrawThemeText", reinterpret_cast<void*>(&DrawThemeText_Hook),
-                           reinterpret_cast<void**>(&g_textOrig), &g_targets[5]) &&
-           CreateAndEnable(ux, "DrawThemeTextEx", reinterpret_cast<void*>(&DrawThemeTextEx_Hook),
-                           reinterpret_cast<void**>(&g_textExOrig), &g_targets[6]);
+                           reinterpret_cast<void**>(&g_colorOrig), &g_targets[2]);
 }
 
 inline Stats GetStats() noexcept {

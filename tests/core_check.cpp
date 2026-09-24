@@ -39,3 +39,4 @@ static_assert(!EffectiveDark(Mode::ForceDark,    Signals{true, false}));
 static_assert(!EffectiveDark(Mode::ForceDark,    Signals{true, true}));
 static_assert(!EffectiveDark(Mode::FollowSystem, Signals{true, false}));
 static_assert(!EffectiveDark(Mode::FollowSystem, Signals{true, true}));
+
