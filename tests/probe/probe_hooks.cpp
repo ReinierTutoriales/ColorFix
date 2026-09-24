@@ -71,7 +71,8 @@ std::atomic<COLORREF> g_textCausalIncoming{CLR_INVALID};
 std::atomic<COLORREF> g_textCausalMapped{CLR_INVALID};
 
 COLORREF TextCausalTap(HDC, COLORREF incoming, COLORREF mapped) {
-    if (!g_textCausalTarget || bfo::t_painting != g_textCausalTarget) return mapped;
+    if (!g_textCausalTarget || colorfix::probe::button_face::t_painting != g_textCausalTarget)
+        return mapped;
     g_textCausalCalls.fetch_add(1, std::memory_order_relaxed);
     if (incoming == RGB(0, 0, 0)) g_textCausalBlack.fetch_add(1, std::memory_order_relaxed);
     g_textCausalIncoming.store(incoming, std::memory_order_relaxed);
