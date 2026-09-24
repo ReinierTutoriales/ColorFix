@@ -843,7 +843,9 @@ int main(int argc, char** argv) {
     // Brushes that must stay untouched are created or fetched through the
     // ColorFix originals, so no other hook decides the input.
     namespace cfp9 = colorfix::policy;
-    auto fillCenter = [](HBRUSH brush) {
+    // original=true calls the ColorFix trampoline directly: the unhooked result
+    // for the same input on a fresh DC, used as a differential oracle.
+    auto fillCenter = [](HBRUSH brush, bool original) {
         BITMAPINFO bi{};
         bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bi.bmiHeader.biWidth = 4;
@@ -860,7 +862,10 @@ int main(int argc, char** argv) {
             auto* px = static_cast<std::uint32_t*>(bits);
             for (int i = 0; i < 16; ++i) px[i] = 0x00010203;  // kSentinel RGB(1, 2, 3)
             const RECT r{0, 0, 4, 4};
-            FillRect(dc, &r, brush);
+            if (original)
+                cfh::FillRect_Original(dc, &r, brush);
+            else
+                FillRect(dc, &r, brush);
             GdiFlush();
             const std::uint32_t v = px[2 * 4 + 2];
             out = RGB((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
@@ -882,29 +887,30 @@ int main(int argc, char** argv) {
         const char* name;
         HBRUSH brush;
         cfp9::Signals signals;  // published with ForceDark for this case
-        COLORREF expected;
+        COLORREF expected;      // CLR_INVALID: the unhooked result (differential)
         long substitutions;     // expected product substitutions
         long pseudo;            // expected COLOR_x + 1 observations
-        bool colorGate;         // false: the pixel is a finding, not an assertion
     };
     HBRUSH sameColor = cfh::CreateSolidBrush_Original(origFace);
     const cfp9::Signals sigOn = initial.signals;
-    // FillRect.pseudo: the product must pass COLOR_x + 1 through untouched; the
-    // resulting pixel depends on how USER32 resolves the index internally, so
-    // it is reported, not asserted. FillRect.null expects the sentinel intact.
+    // FillRect.pseudo and FillRect.null: the product must pass the value
+    // through untouched. What USER32 then paints (COLOR_x + 1 resolution, NULL
+    // brush) is its own behavior, so the oracle is the unhooked call on a fresh
+    // DC with the same input, not a predicted color. Run 214 showed that a NULL
+    // brush paints the DC's default brush (FFFFFF), not nothing.
     const FillCase fillCases[] = {
-        {"FillRect.sys-on",    sysFace,      sigOn,         exp3dFace,     1, 0, true},
-        {"FillRect.sys-off",   sysFace,      sigOn,         origFace,      0, 0, true},
-        {"FillRect.hc-veto",   sysFace,      {true, false}, origFace,      0, 0, true},
-        {"FillRect.samecolor", sameColor,    sigOn,         origFace,      0, 0, true},
-        {"FillRect.unmapped",  sysHighlight, sigOn,         origHighlight, 0, 0, true},
+        {"FillRect.sys-on",    sysFace,      sigOn,         exp3dFace,     1, 0},
+        {"FillRect.sys-off",   sysFace,      sigOn,         origFace,      0, 0},
+        {"FillRect.hc-veto",   sysFace,      {true, false}, origFace,      0, 0},
+        {"FillRect.samecolor", sameColor,    sigOn,         origFace,      0, 0},
+        {"FillRect.unmapped",  sysHighlight, sigOn,         origHighlight, 0, 0},
         {"FillRect.stock", static_cast<HBRUSH>(cfh::GetStockObject_Original(WHITE_BRUSH)),
-                                             sigOn,         kWhite,        0, 0, true},
+                                             sigOn,         kWhite,        0, 0},
         {"FillRect.semantic",  cfh::SemanticBrush(COLOR_BTNFACE),
-                                             sigOn,         exp3dFace,     0, 0, true},
+                                             sigOn,         exp3dFace,     0, 0},
         {"FillRect.pseudo", reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1)),
-                                             sigOn,         origFace,      0, 1, false},
-        {"FillRect.null",      nullptr,      sigOn,         kSentinel,     0, 0, true},
+                                             sigOn,         CLR_INVALID,   0, 1},
+        {"FillRect.null",      nullptr,      sigOn,         CLR_INVALID,   0, 0},
     };
     for (const auto& fc : fillCases) {
         run(fc.name, HookId::FillRect, [&](Autotest& t) {
@@ -912,15 +918,14 @@ int main(int argc, char** argv) {
             cfp9::Publish(off ? cfp9::Mode::Disabled : cfp9::Mode::ForceDark, fc.signals);
             const long sub0 = cfh::g_fillRectSubstituted.load();
             const long ps0 = cfh::g_fillRectPseudo.load();
-            t.expected = fc.expected;
-            t.observed = fillCenter(fc.brush);
+            t.expected = fc.expected != CLR_INVALID ? fc.expected : fillCenter(fc.brush, true);
+            t.observed = fillCenter(fc.brush, false);
             const long sub = cfh::g_fillRectSubstituted.load() - sub0;
             const long ps = cfh::g_fillRectPseudo.load() - ps0;
-            t.valueOk = (!fc.colorGate || t.observed == t.expected) &&
+            t.valueOk = t.expected != CLR_INVALID && t.observed == t.expected &&
                         sub == fc.substitutions && ps == fc.pseudo;
-            if (!t.valueOk || !fc.colorGate)
-                std::printf("detail: %s substitutions=%ld pseudo=%ld color-gate=%d\n", fc.name,
-                            sub, ps, fc.colorGate ? 1 : 0);
+            if (!t.valueOk)
+                std::printf("detail: %s substitutions=%ld pseudo=%ld\n", fc.name, sub, ps);
         });
     }
     cfp9::Publish(cfp9::Mode::ForceDark, initial.signals);  // back to the run's state
