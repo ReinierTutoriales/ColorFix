@@ -245,6 +245,28 @@ Evidence established by the current probes:
     were present before opt-out, absent during opt-out, and present again after
     restoration. This establishes the transition for the probe controls, not a
     product-wide policy for when theme opt-out should be applied.
+- Button face causality (probe increment 9a, probe-only detours, one candidate
+  at a time, control vs experiment of the same state, both load orders,
+  x64/x86/ARM64; hover excluded as non-deterministic):
+  - All candidate autotests passed (interception counted, marker or
+    suppression effective), restoration was exact and the product hooks were
+    still live afterwards, so the verdicts below are measurements.
+  - USER32 classic button (window C), NORMAL/PRESSED/DISABLED/DEFAULTED: the
+    face (`F0F0F0`) is caused by `FillRect` (marker reached the face center in
+    both capture modes). `DrawEdge` is called but does not paint the face;
+    `DrawFrameControl`, `PatBlt`, `ExtTextOutW` and `DrawThemeBackground` are
+    not called. `FillRect` and `DrawEdge` draw on the button's own window DC
+    (`WindowFromDC` matched 16/16).
+  - comctl32 v6 button with theme opt-out (window T), all four states: the
+    face is caused by `FillRect`, and suppressing `DrawFrameControl` also
+    removes it. Consistent with `DrawFrameControl` filling the face through
+    `FillRect`; that internal call chain is an inference.
+  - comctl32 v6 themed button (window V), all four states: the face is caused
+    by `DrawThemeBackground` class `Button`/`BP_PUSHBUTTON` (marker in both
+    modes). Face colors: NORMAL/DEFAULTED `FDFDFD`, PRESSED `CCE4F7`,
+    DISABLED `F9F9F9`. `FillRect` is called but is not causal; all draws use
+    a memory DC (`WindowFromDC` 0).
+  - Not yet measured: which brush handle the classic face `FillRect` receives.
 
 These results were reproduced by CI on x64, x86, and native ARM64. Increment 3 was squash-merged to `main` as `5cd97a1`; main CI run 48 was reported green on all three architectures.
 
