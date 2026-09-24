@@ -51,6 +51,15 @@ inline volatile LONG g_dropped = 0;
 inline HWND g_v = nullptr;
 inline HWND g_l = nullptr;
 
+// Increment 9a. While paused, the observer keeps the HTHEME -> class map but
+// neither counts nor records events, so the historical report and the
+// 512-event buffer are untouched. g_drawIntercept (null by default: fully
+// passive) lets the causal experiment replace one DrawThemeBackground call.
+inline volatile LONG g_paused = 0;
+using DrawIntercept_t = bool (*)(const wchar_t* klass, HDC dc, int part, int state,
+                                 const RECT* rect);
+inline DrawIntercept_t g_drawIntercept = nullptr;
+
 using OpenThemeData_t = HTHEME (WINAPI*)(HWND, LPCWSTR);
 using OpenThemeDataForDpi_t = HTHEME (WINAPI*)(HWND, LPCWSTR, UINT);
 using DrawThemeBackground_t = HRESULT (WINAPI*)(HTHEME, HDC, int, int, const RECT*, const RECT*);
@@ -158,21 +167,24 @@ inline void Record(Event::Kind kind, HTHEME theme, int part, int state, int prop
 
 inline HTHEME WINAPI OpenThemeData_Hook(HWND hwnd, LPCWSTR klass) {
     HTHEME h = g_openOrig(hwnd, klass);
-    InterlockedIncrement(&g_open);
+    if (!g_paused) InterlockedIncrement(&g_open);
     RecordTheme(h, klass);
     return h;
 }
 
 inline HTHEME WINAPI OpenThemeDataForDpi_Hook(HWND hwnd, LPCWSTR klass, UINT dpi) {
     HTHEME h = g_openDpiOrig(hwnd, klass, dpi);
-    InterlockedIncrement(&g_openForDpi);
+    if (!g_paused) InterlockedIncrement(&g_openForDpi);
     RecordTheme(h, klass);
     return h;
 }
 
 inline HRESULT WINAPI DrawThemeBackground_Hook(HTHEME theme, HDC dc, int part, int state,
                                                 const RECT* rect, const RECT* clip) {
+    const DrawIntercept_t intercept = g_drawIntercept;
+    if (intercept && intercept(ThemeClass(theme), dc, part, state, rect)) return S_OK;
     HRESULT hr = g_drawOrig(theme, dc, part, state, rect, clip);
+    if (g_paused) return hr;
     InterlockedIncrement(&g_draw);
     Record(Event::Kind::Draw, theme, part, state, 0, dc, rect);
     return hr;
@@ -181,6 +193,7 @@ inline HRESULT WINAPI DrawThemeBackground_Hook(HTHEME theme, HDC dc, int part, i
 inline HRESULT WINAPI DrawThemeBackgroundEx_Hook(HTHEME theme, HDC dc, int part, int state,
                                                   const RECT* rect, const DTBGOPTS* opts) {
     HRESULT hr = g_drawExOrig(theme, dc, part, state, rect, opts);
+    if (g_paused) return hr;
     InterlockedIncrement(&g_drawEx);
     Record(Event::Kind::DrawEx, theme, part, state, 0, dc, rect);
     return hr;
@@ -189,6 +202,7 @@ inline HRESULT WINAPI DrawThemeBackgroundEx_Hook(HTHEME theme, HDC dc, int part,
 inline HRESULT WINAPI GetThemeColor_Hook(HTHEME theme, int part, int state, int prop,
                                          COLORREF* color) {
     HRESULT hr = g_colorOrig(theme, part, state, prop, color);
+    if (g_paused) return hr;
     InterlockedIncrement(&g_color);
     Record(Event::Kind::Color, theme, part, state, prop, nullptr, nullptr);
     return hr;
