@@ -410,6 +410,49 @@ intervention; run 238 (pull request on `9e5f505`) completed the call-context
 and Static-control characterization. All six processes in run 238 ended with
 `exit=0`, with the increment 9b and 9c gates unchanged.
 
+- Button text candidate safety and product rule (probe increments 9e/9f and
+  product run 294, both load orders, x64/x86/ARM64):
+  - Increment 9e rejected a blanket DrawThemeText-scoped bypass. Checkbox and
+    radio labels changed from `202020:DCDCDC` (582 text pixels, contrast
+    11.9) to black text on `202020` (contrast 1.3); group-box text showed
+    the same regression, with 694 `DCDCDC` pixels in the mapped capture.
+  - Increment 9f measured the narrower rule: bypass literal SetTextColor
+    mapping only inside DrawThemeText/DrawThemeTextEx for a known single-class
+    `Button` HTHEME and part 1 (`BP_PUSHBUTTON`). Push NORMAL and PRESSED
+    changed exactly 582 pixels from `DCDCDC` to `000000`; DISABLED changed
+    zero pixels because its `838383` text is not mapped. Checkbox, radio,
+    group box and the Static safety control changed zero pixels.
+  - The shared-handle hypothesis was confirmed by the probe: the push button,
+    checkbox, radio and group box used the same HTHEME. Therefore HTHEME
+    classification is reference-counted across observed OpenThemeData* calls
+    and successful CloseThemeData calls; forgetting on every close is invalid.
+  - Product contract: ColorFix owns the OpenThemeData, OpenThemeDataForDpi,
+    OpenThemeDataEx, CloseThemeData, DrawThemeText and DrawThemeTextEx detours.
+    The probe observes those targets through COLORFIX_PROBE taps, so there is
+    no second detour on the same target. The six UxTheme exports are resolved
+    before registration; the enhancement is active only when the complete
+    surface registered, and partial registration remains inert. ColorFix does
+    not load uxtheme.dll to obtain this enhancement.
+  - Run 294 is the product gate. In all six processes the UxTheme product
+    autotest reported complete=1 and classifier+refcount PASS. The themed push
+    button under policy ON rendered NORMAL/PRESSED text as `000000` x582
+    over the unchanged `FDFDFD`/`CCE4F7` themed faces; DISABLED remained
+    `838383`. Static remained `2D2D2D:DCDCDC`; checkbox and radio remained
+    `202020:DCDCDC` x582 and group box `202020:DCDCDC` x694.
+  - The final passive observer state is a gate, not an earlier snapshot.
+    Run 294 retained every observed event (`dropped=0`) in all six processes,
+    reported observer PASS, and ended `infrastructure=VALID hooks=PASS exit=0`.
+    The increment 9b and 9c gates remained unchanged.
+  - Unknown, ambiguous/multi-class and TLS-overflow contexts fail closed: they
+    keep the ordinary ColorFix literal mapping rather than applying the
+    push-button bypass. Handles opened before the product can observe their
+    class are therefore not guessed.
+
+Increment 9e/9f evidence: experimental runs 261 and 263 established the scoped
+decision table and shared-HTHEME/refcount requirement. Product evidence: pull
+request run 294 on `1fa5ad6`, all three architecture jobs and both load
+orders successful, with complete product gates visible in the CI output.
+
 ## 10. Requirements for future rendering mechanisms
 
 Button-specific handling, menus, Common Controls v6, UxTheme, GDI+, DirectWrite,
