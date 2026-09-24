@@ -1829,7 +1829,8 @@ int main(int argc, char** argv) {
     PrintRgb(text9dSB.bg); std::printf(":"); PrintRgb(text9dSB.t1);
     std::printf("x%ld cr=%.1f hist=", text9dSB.t1N, ContrastRatio(text9dSB.bg, text9dSB.t1));
     for (int i = 0; i < g_textInputKinds; ++i) {
-        if (i) std::printf(","); PrintRgb(g_textInputBins[i].color);
+        if (i) std::printf(",");
+        PrintRgb(g_textInputBins[i].color);
         std::printf("x%ld", g_textInputBins[i].count);
     }
     std::printf("\n");
@@ -1931,8 +1932,8 @@ int main(int argc, char** argv) {
     // known Button handle, without depending on what USER32 happens to open.
     bool text9fDecision = true;
     {
-        constexpr HTHEME known = reinterpret_cast<HTHEME>(static_cast<UINT_PTR>(0x9F01));
-        constexpr HTHEME unknown = reinterpret_cast<HTHEME>(static_cast<UINT_PTR>(0x9F02));
+        const HTHEME known = reinterpret_cast<HTHEME>(static_cast<UINT_PTR>(0x9F01));
+        const HTHEME unknown = reinterpret_cast<HTHEME>(static_cast<UINT_PTR>(0x9F02));
         uxo::RecordTheme(known, L"Button");
         const HWND savedPainting = bfo::t_painting;
         const int savedDepth = uxo::t_drawThemeTextDepth;
