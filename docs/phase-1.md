@@ -8,6 +8,9 @@ Validate semantic system-color interception before UxTheme or modern rendering A
 
 - USER32: `GetSysColor`, `GetSysColorBrush`
 - GDI32: `GetStockObject`, `SetTextColor`, `SetBkColor`, `CreateSolidBrush`
+- UXTHEME (optional complete extension when already loaded): `OpenThemeData`,
+  `OpenThemeDataForDpi`, `OpenThemeDataEx`, `CloseThemeData`,
+  `DrawThemeText`, `DrawThemeTextEx`
 
 ## Invariants
 
@@ -16,7 +19,12 @@ Validate semantic system-color interception before UxTheme or modern rendering A
 - Never call a hooked entry point internally when the original trampoline is available.
 - Brushes returned in place of `GetSysColorBrush` are process-lifetime objects because callers must not delete system brushes.
 - Hook installation is queued and committed as a batch.
-- Phase 1 does not hook UxTheme, GDI+, DirectWrite, or Direct2D.
+- The UxTheme extension is fail-closed: ColorFix does not load uxtheme.dll for
+  it, resolves the complete six-export surface before registration, and only
+  enables its HTHEME classification/context state after all six hooks register.
+- UxTheme tracking is used only to suppress literal black-to-light mapping for
+  known single-class Button part 1 text. Unknown/ambiguous handles keep normal
+  mapping. GDI+, DirectWrite, and Direct2D remain outside Phase 1.
 
 ## Test matrix
 
