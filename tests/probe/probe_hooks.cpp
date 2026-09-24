@@ -561,7 +561,7 @@ int main(int argc, char** argv) {
         }
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    std::printf("ColorFixProbe increment 9a - button face causal characterization\n");
+    std::printf("ColorFixProbe increment 9b (measure) - FillRect brush identity\n");
 #if defined(_M_ARM64)
     std::printf("arch: ARM64\n");
 #elif defined(_M_X64) || defined(__x86_64__)
@@ -1095,6 +1095,68 @@ int main(int argc, char** argv) {
         for (int c = 0; c < bfo::kCandidates; ++c)
             std::printf(" %s=%ld/%ld", bfo::kShort[c], bfDc[c], bfAtt[c]);
         std::printf("\n");
+    }
+
+    // 9b measurement: which brush identity the classic face FillRect receives.
+    // Recorded before substitution, in every experiment shot of C and T-off.
+    // A system brush handle, a COLOR_x+1 index or another brush lead to
+    // different product rules, so this is measured before any 9b hook exists.
+    auto describeBrush = [](HBRUSH b, char* out, size_t n) {
+        const auto v = reinterpret_cast<ULONG_PTR>(b);
+        LOGBRUSH lb{};
+        const bool haveLog = GetObjectW(b, sizeof(lb), &lb) == sizeof(lb);
+        const unsigned long rgb =
+            haveLog ? static_cast<unsigned long>((GetRValue(lb.lbColor) << 16) |
+                                                 (GetGValue(lb.lbColor) << 8) |
+                                                 GetBValue(lb.lbColor))
+                    : 0ul;
+        if (v > 0 && v <= static_cast<ULONG_PTR>(cfh::kSysColorCount)) {
+            std::snprintf(out, n, "index:COLOR+1 color-index=%lu",
+                          static_cast<unsigned long>(v - 1));
+            return;
+        }
+        for (int i = 0; i < cfh::kSysColorCount; ++i) {
+            if (b == cfh::GetSysColorBrush_Original(i)) {
+                std::snprintf(out, n, "sysbrush:%d color=%06lX", i, rgb);
+                return;
+            }
+        }
+        if (cfh::IsColorFixBrush(b)) {
+            std::snprintf(out, n, "colorfix-semantic color=%06lX", rgb);
+            return;
+        }
+        std::snprintf(out, n, "other type=%lu style=%u color=%06lX",
+                      static_cast<unsigned long>(GetObjectType(b)),
+                      haveLog ? lb.lbStyle : 0xFFFFu, rgb);
+    };
+    const long bfSamples = bfo::g_brushSampleCount.load() < bfo::kMaxBrushSamples
+                               ? bfo::g_brushSampleCount.load()
+                               : bfo::kMaxBrushSamples;
+    if (bfo::g_brushSamplesDropped.load() > 0) bfInfra = false;
+    for (int ti = 0; ti < 2; ++ti) {  // C and T-off: the causal classic faces
+        const BfTarget& t = bfTargets[ti];
+        char kinds[4][64] = {};
+        long counts[4] = {};
+        int nKinds = 0;
+        long other = 0;
+        for (long i = 0; i < bfSamples; ++i) {
+            if (bfo::g_brushSamples[i].target != t.button) continue;
+            char desc[64];
+            describeBrush(bfo::g_brushSamples[i].brush, desc, sizeof(desc));
+            int k = 0;
+            while (k < nKinds && std::strcmp(kinds[k], desc) != 0) ++k;
+            if (k == nKinds) {
+                if (nKinds == 4) { ++other; continue; }
+                std::snprintf(kinds[nKinds], sizeof(kinds[nKinds]), "%s", desc);
+                ++nKinds;
+            }
+            ++counts[k];
+        }
+        for (int k = 0; k < nKinds; ++k)
+            std::printf("buttonface: %s fillrect-brush %s calls=%ld\n", t.name, kinds[k],
+                        counts[k]);
+        std::printf("buttonface: %s fillrect-brush kinds=%d more=%ld dropped=%ld\n", t.name,
+                    nKinds, other, bfo::g_brushSamplesDropped.load());
     }
 
     for (const auto& t : bfTargets) bfo::Unsubclass(t.button);

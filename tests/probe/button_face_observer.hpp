@@ -76,9 +76,31 @@ inline DrawFrameControl_t g_drawFrameControlOrig = nullptr;
 inline DrawEdge_t g_drawEdgeOrig = nullptr;
 inline void* g_targets[5]{};
 
+// Increment 9b measurement: the brush argument of every FillRect call that
+// belongs to a target button's paint, recorded before any substitution.
+struct BrushSample {
+    HWND target;
+    HBRUSH brush;
+};
+inline constexpr long kMaxBrushSamples = 1024;
+inline BrushSample g_brushSamples[kMaxBrushSamples]{};
+inline std::atomic<long> g_brushSampleCount{0};
+inline std::atomic<long> g_brushSamplesDropped{0};
+
+inline void RecordBrush(HWND target, HBRUSH brush) noexcept {
+    const long slot = g_brushSampleCount.fetch_add(1, std::memory_order_relaxed);
+    if (slot >= kMaxBrushSamples) {
+        g_brushSamplesDropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    g_brushSamples[slot] = {target, brush};
+}
+
 inline int WINAPI FillRect_Hook(HDC dc, const RECT* r, HBRUSH brush) {
-    if (Attribute(kFillRect, dc)) return g_fillRectOrig(dc, r, g_markerBrush);
-    return g_fillRectOrig(dc, r, brush);
+    const bool intervene = Attribute(kFillRect, dc);
+    const HWND target = g_target.load(std::memory_order_relaxed);
+    if (target && t_painting == target) RecordBrush(target, brush);
+    return g_fillRectOrig(dc, r, intervene ? g_markerBrush : brush);
 }
 
 inline BOOL WINAPI PatBlt_Hook(HDC dc, int x, int y, int w, int h, DWORD rop) {
