@@ -13,6 +13,8 @@ namespace colorfix::probe::uxtheme_observer {
 struct Stats {
     long open = 0;
     long openForDpi = 0;
+    long openEx = 0;
+    long close = 0;
     long draw = 0;
     long drawEx = 0;
     long color = 0;
@@ -44,6 +46,8 @@ inline volatile LONG g_themeCount = 0;
 inline volatile LONG g_eventCount = 0;
 inline volatile LONG g_open = 0;
 inline volatile LONG g_openForDpi = 0;
+inline volatile LONG g_openEx = 0;
+inline volatile LONG g_close = 0;
 inline volatile LONG g_draw = 0;
 inline volatile LONG g_drawEx = 0;
 inline volatile LONG g_color = 0;
@@ -59,12 +63,17 @@ inline volatile LONG g_paused = 0;
 using DrawIntercept_t = bool (*)(const wchar_t* klass, HDC dc, int part, int state,
                                  const RECT* rect);
 inline DrawIntercept_t g_drawIntercept = nullptr;
+struct TextContext { HTHEME theme = nullptr; int part = 0; };
+inline constexpr int kTextContextMax = 8;
+inline thread_local TextContext t_textContext[kTextContextMax]{};
 inline thread_local int t_drawThemeTextDepth = 0;
 inline volatile LONG g_text = 0;
 inline volatile LONG g_textEx = 0;
 
 using OpenThemeData_t = HTHEME (WINAPI*)(HWND, LPCWSTR);
 using OpenThemeDataForDpi_t = HTHEME (WINAPI*)(HWND, LPCWSTR, UINT);
+using OpenThemeDataEx_t = HTHEME (WINAPI*)(HWND, LPCWSTR, DWORD);
+using CloseThemeData_t = HRESULT (WINAPI*)(HTHEME);
 using DrawThemeBackground_t = HRESULT (WINAPI*)(HTHEME, HDC, int, int, const RECT*, const RECT*);
 using DrawThemeBackgroundEx_t = HRESULT (WINAPI*)(HTHEME, HDC, int, int, const RECT*, const DTBGOPTS*);
 using GetThemeColor_t = HRESULT (WINAPI*)(HTHEME, int, int, int, COLORREF*);
@@ -73,12 +82,14 @@ using DrawThemeTextEx_t = HRESULT (WINAPI*)(HTHEME, HDC, int, int, LPCWSTR, int,
 
 inline OpenThemeData_t g_openOrig = nullptr;
 inline OpenThemeDataForDpi_t g_openDpiOrig = nullptr;
+inline OpenThemeDataEx_t g_openExOrig = nullptr;
+inline CloseThemeData_t g_closeOrig = nullptr;
 inline DrawThemeBackground_t g_drawOrig = nullptr;
 inline DrawThemeBackgroundEx_t g_drawExOrig = nullptr;
 inline GetThemeColor_t g_colorOrig = nullptr;
 inline DrawThemeText_t g_textOrig = nullptr;
 inline DrawThemeTextEx_t g_textExOrig = nullptr;
-inline void* g_targets[7]{};
+inline void* g_targets[9]{};
 
 inline void CopyClass(wchar_t* dst, size_t n, LPCWSTR src) noexcept {
     if (!dst || n == 0) return;
@@ -89,6 +100,12 @@ inline void CopyClass(wchar_t* dst, size_t n, LPCWSTR src) noexcept {
 
 inline void RecordTheme(HTHEME theme, LPCWSTR klass) noexcept {
     if (!theme) return;
+    const LONG n = g_themeCount < kMaxThemes ? g_themeCount : kMaxThemes;
+    for (LONG i = n - 1; i >= 0; --i)
+        if (g_themes[i].theme == theme) {
+            CopyClass(g_themes[i].klass, _countof(g_themes[i].klass), klass);
+            return;
+        }
     LONG slot = InterlockedIncrement(&g_themeCount) - 1;
     if (slot < 0 || slot >= kMaxThemes) {
         InterlockedIncrement(&g_dropped);
@@ -98,11 +115,50 @@ inline void RecordTheme(HTHEME theme, LPCWSTR klass) noexcept {
     CopyClass(g_themes[slot].klass, _countof(g_themes[slot].klass), klass);
 }
 
+inline void ForgetTheme(HTHEME theme) noexcept {
+    const LONG n = g_themeCount < kMaxThemes ? g_themeCount : kMaxThemes;
+    for (LONG i = n - 1; i >= 0; --i)
+        if (g_themes[i].theme == theme) {
+            g_themes[i].theme = nullptr;
+            g_themes[i].klass[0] = L'\0';
+            return;
+        }
+}
+
+inline bool IsKnownButtonClass(HTHEME theme) noexcept {
+    const wchar_t* klass = ThemeClass(theme);
+    if (!klass || klass[0] == L'?' || wcschr(klass, L';')) return false;
+    const wchar_t* base = wcsstr(klass, L"::");
+    base = base ? base + 2 : klass;
+    return _wcsicmp(base, L"Button") == 0;
+}
+
+inline TextContext CurrentTextContext() noexcept {
+    return t_drawThemeTextDepth > 0 && t_drawThemeTextDepth <= kTextContextMax
+               ? t_textContext[t_drawThemeTextDepth - 1] : TextContext{};
+}
+
 inline const wchar_t* ThemeClass(HTHEME theme) noexcept {
     const LONG n = g_themeCount < kMaxThemes ? g_themeCount : kMaxThemes;
     for (LONG i = n - 1; i >= 0; --i)
         if (g_themes[i].theme == theme) return g_themes[i].klass;
     return L"?";
+}
+
+inline HTHEME WINAPI OpenThemeDataEx_Hook(HWND hwnd, LPCWSTR klass, DWORD flags) {
+    HTHEME h = g_openExOrig(hwnd, klass, flags);
+    if (!g_paused) InterlockedIncrement(&g_openEx);
+    RecordTheme(h, klass);
+    return h;
+}
+
+inline HRESULT WINAPI CloseThemeData_Hook(HTHEME theme) {
+    const HRESULT hr = g_closeOrig(theme);
+    if (SUCCEEDED(hr)) {
+        if (!g_paused) InterlockedIncrement(&g_close);
+        ForgetTheme(theme);
+    }
+    return hr;
 }
 
 inline bool Intersects(const RECT& a, const RECT& b) noexcept {
@@ -216,7 +272,8 @@ inline HRESULT WINAPI GetThemeColor_Hook(HTHEME theme, int part, int state, int 
 }
 
 inline HRESULT WINAPI DrawThemeText_Hook(HTHEME theme, HDC dc, int part, int state, LPCWSTR text, int count, DWORD flags, DWORD flags2, const RECT* rect) {
-    ++t_drawThemeTextDepth;
+    const int depth = t_drawThemeTextDepth++;
+    if (depth < kTextContextMax) t_textContext[depth] = {theme, part};
     const HRESULT hr = g_textOrig(theme, dc, part, state, text, count, flags, flags2, rect);
     --t_drawThemeTextDepth;
     InterlockedIncrement(&g_text);
@@ -224,7 +281,8 @@ inline HRESULT WINAPI DrawThemeText_Hook(HTHEME theme, HDC dc, int part, int sta
 }
 
 inline HRESULT WINAPI DrawThemeTextEx_Hook(HTHEME theme, HDC dc, int part, int state, LPCWSTR text, int count, DWORD flags, LPRECT rect, const DTTOPTS* opts) {
-    ++t_drawThemeTextDepth;
+    const int depth = t_drawThemeTextDepth++;
+    if (depth < kTextContextMax) t_textContext[depth] = {theme, part};
     const HRESULT hr = g_textExOrig(theme, dc, part, state, text, count, flags, rect, opts);
     --t_drawThemeTextDepth;
     InterlockedIncrement(&g_textEx);
@@ -264,20 +322,24 @@ inline bool Install(HWND v, HWND l) {
                            reinterpret_cast<void**>(&g_openOrig), &g_targets[0]) &&
            CreateAndEnable(ux, "OpenThemeDataForDpi", reinterpret_cast<void*>(&OpenThemeDataForDpi_Hook),
                            reinterpret_cast<void**>(&g_openDpiOrig), &g_targets[1]) &&
+           CreateAndEnable(ux, "OpenThemeDataEx", reinterpret_cast<void*>(&OpenThemeDataEx_Hook),
+                           reinterpret_cast<void**>(&g_openExOrig), &g_targets[2]) &&
+           CreateAndEnable(ux, "CloseThemeData", reinterpret_cast<void*>(&CloseThemeData_Hook),
+                           reinterpret_cast<void**>(&g_closeOrig), &g_targets[3]) &&
            CreateAndEnable(ux, "DrawThemeBackground", reinterpret_cast<void*>(&DrawThemeBackground_Hook),
-                           reinterpret_cast<void**>(&g_drawOrig), &g_targets[2]) &&
+                           reinterpret_cast<void**>(&g_drawOrig), &g_targets[4]) &&
            CreateAndEnable(ux, "DrawThemeBackgroundEx", reinterpret_cast<void*>(&DrawThemeBackgroundEx_Hook),
-                           reinterpret_cast<void**>(&g_drawExOrig), &g_targets[3]) &&
+                           reinterpret_cast<void**>(&g_drawExOrig), &g_targets[5]) &&
            CreateAndEnable(ux, "GetThemeColor", reinterpret_cast<void*>(&GetThemeColor_Hook),
-                           reinterpret_cast<void**>(&g_colorOrig), &g_targets[4]) &&
+                           reinterpret_cast<void**>(&g_colorOrig), &g_targets[6]) &&
            CreateAndEnable(ux, "DrawThemeText", reinterpret_cast<void*>(&DrawThemeText_Hook),
-                           reinterpret_cast<void**>(&g_textOrig), &g_targets[5]) &&
+                           reinterpret_cast<void**>(&g_textOrig), &g_targets[7]) &&
            CreateAndEnable(ux, "DrawThemeTextEx", reinterpret_cast<void*>(&DrawThemeTextEx_Hook),
-                           reinterpret_cast<void**>(&g_textExOrig), &g_targets[6]);
+                           reinterpret_cast<void**>(&g_textExOrig), &g_targets[8]);
 }
 
 inline Stats GetStats() noexcept {
-    return {g_open, g_openForDpi, g_draw, g_drawEx, g_color, g_dropped};
+    return {g_open, g_openForDpi, g_openEx, g_close, g_draw, g_drawEx, g_color, g_dropped};
 }
 
 inline bool Autotest() noexcept {
@@ -293,8 +355,8 @@ inline bool SameReportedEvent(const Event& a, const Event& b) noexcept {
 
 inline void PrintReport() {
     const Stats s = GetStats();
-    std::printf("uxtheme: observer open=%ld open-dpi=%ld draw=%ld draw-ex=%ld color=%ld dropped=%ld %s\n",
-                s.open, s.openForDpi, s.draw, s.drawEx, s.color, s.dropped,
+    std::printf("uxtheme: observer open=%ld open-dpi=%ld open-ex=%ld close=%ld draw=%ld draw-ex=%ld color=%ld dropped=%ld %s\n",
+                s.open, s.openForDpi, s.openEx, s.close, s.draw, s.drawEx, s.color, s.dropped,
                 Autotest() ? "PASS" : "INFRASTRUCTURE_FAILURE");
 
     // Keep the CI notice below the ~4 KB annotation limit while preserving
