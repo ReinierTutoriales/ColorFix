@@ -60,6 +60,35 @@ constexpr COLORREF kOrange = RGB(200, 100, 0);  // luma 113: untouched by the ma
 HBRUSH g_orange = nullptr;
 constexpr int kStaticId = 101, kEditId = 102, kButtonId = 103, kCustomStaticId = 104;
 
+// Increment 9d probe-only SetTextColor tap state. Attribution uses the same
+// paint-context TLS established by the button-face subclass; this works for
+// themed buttons even though they render through a memory DC.
+HWND g_textCausalTarget = nullptr;
+std::atomic<bool> g_textCausalBypass{false};
+std::atomic<long> g_textCausalCalls{0};
+std::atomic<long> g_textCausalBlack{0};
+std::atomic<COLORREF> g_textCausalIncoming{CLR_INVALID};
+std::atomic<COLORREF> g_textCausalMapped{CLR_INVALID};
+std::atomic<long> g_textCausalInside{0};
+struct TextInputBin { COLORREF color; long count; };
+TextInputBin g_textInputBins[8]{};
+int g_textInputKinds = 0;
+
+COLORREF TextCausalTap(HDC, COLORREF incoming, COLORREF mapped) {
+    if (!g_textCausalTarget || colorfix::probe::button_face::t_painting != g_textCausalTarget)
+        return mapped;
+    g_textCausalCalls.fetch_add(1, std::memory_order_relaxed);
+    if (incoming == RGB(0, 0, 0)) g_textCausalBlack.fetch_add(1, std::memory_order_relaxed);
+    g_textCausalIncoming.store(incoming, std::memory_order_relaxed);
+    g_textCausalMapped.store(mapped, std::memory_order_relaxed);
+    if (uxo::t_drawThemeTextDepth > 0) g_textCausalInside.fetch_add(1, std::memory_order_relaxed);
+    int i = 0;
+    while (i < g_textInputKinds && g_textInputBins[i].color != incoming) ++i;
+    if (i < g_textInputKinds) ++g_textInputBins[i].count;
+    else if (g_textInputKinds < 8) g_textInputBins[g_textInputKinds++] = {incoming, 1};
+    return g_textCausalBypass.load(std::memory_order_relaxed) ? incoming : mapped;
+}
+
 enum class Surface {
     LiteralBrush, BkColor, SysColorBrush, StockWhite, Magenta, ClassBg,
     CtlStatic, CtlEdit, CtlButton, CtlCustom
@@ -552,10 +581,12 @@ long TDraws(LONG from, LONG to, const wchar_t* klass, int part) {
 // size-based UxTheme attribution stays unambiguous.
 constexpr int kUW = 82, kUH = 72;
 constexpr int kClassicId = 106;
+constexpr int kTextStaticId = 107;
 constexpr RECT kUStatic{10, 10, 10 + kUW, 10 + kUH};
 constexpr RECT kUEdit{110, 10, 110 + kUW, 10 + kUH};
 constexpr RECT kUButton{210, 10, 210 + kUW, 10 + kUH};
 constexpr RECT kUClassic{10, 110, 10 + kUW, 110 + kUH};
+constexpr RECT kUTextStatic{110, 110, 110 + kUW, 110 + kUH};
 constexpr long kMinTextPixels = 40;  // below this the text was not captured
 HFONT g_textFont = nullptr;  // bold, NONANTIALIASED_QUALITY; created before hooks
 
@@ -578,7 +609,8 @@ bool CreateUChildren(HANDLE actx, HWND u) {
     if (!ActivateActCtx(actx, &cookie)) return false;
     const bool v6 = child(L"STATIC", L"", 0, kUStatic, kStaticId) &&
                     child(L"EDIT", L"", WS_BORDER, kUEdit, kEditId) &&
-                    child(L"BUTTON", L"MM", BS_PUSHBUTTON, kUButton, kButtonId);
+                    child(L"BUTTON", L"MM", BS_PUSHBUTTON, kUButton, kButtonId) &&
+                    child(L"STATIC", L"MM", SS_CENTER, kUTextStatic, kTextStaticId);
     DeactivateActCtx(0, cookie);
     return v6 && child(L"BUTTON", L"MM", BS_PUSHBUTTON, kUClassic, kClassicId);
 }
@@ -1474,7 +1506,8 @@ int main(int argc, char** argv) {
     long uRetries = 0, uMaxAttempts = 0;
     const HWND uButton = GetDlgItem(winU, kButtonId);
     const HWND uClassic = GetDlgItem(winU, kClassicId);
-    if (!uButton || !uClassic) uInfra = false;
+    const HWND uTextStatic = GetDlgItem(winU, kTextStaticId);
+    if (!uButton || !uClassic || !uTextStatic) uInfra = false;
     auto uSentinelOk = [](const WindowShot& s) {
         for (int m = 0; m < 2; ++m) {
             COLORREF c = CLR_INVALID;
@@ -1661,6 +1694,127 @@ int main(int argc, char** argv) {
         }
     }
     cfp::Publish(cfp::Mode::ForceDark, {});
+
+    // ------------------------------------ Phase 9d: themed text causality
+    // Measurement only. Intervene at the product SetTextColor hook for the
+    // U themed button's paint: control keeps MapLiteralColor, experiment
+    // passes the caller's color through, restoration reenables mapping.
+    // If only this intervention restores black text on the unchanged themed
+    // face, the product SetTextColor mapping is causal for the 9c regression.
+    std::printf("\n[button text 9d] themed SetTextColor causality\n");
+    bool text9dInfra = true;
+    g_textCausalCalls.store(0);
+    g_textCausalBlack.store(0);
+    g_textCausalIncoming.store(CLR_INVALID);
+    g_textCausalMapped.store(CLR_INVALID);
+    g_textCausalInside.store(0);
+    g_textInputKinds = 0;
+    for (auto& bin : g_textInputBins) bin = {CLR_INVALID, 0};
+    g_textCausalTarget = uButton;
+    if (!bfo::Subclass(uButton)) text9dInfra = false;
+    cfh::g_probeSetTextColorTap.store(&TextCausalTap, std::memory_order_release);
+
+    g_textCausalBypass.store(false);
+    const WindowShot text9dMapped = uShoot(uButton);
+    const long text9dMappedCalls = g_textCausalCalls.load();
+    g_textCausalBypass.store(true);
+    const WindowShot text9dBypass = uShoot(uButton);
+    const long text9dBypassCalls = g_textCausalCalls.load() - text9dMappedCalls;
+    g_textCausalBypass.store(false);
+    const WindowShot text9dRestored = uShoot(uButton);
+    const long text9dRestoreCalls =
+        g_textCausalCalls.load() - text9dMappedCalls - text9dBypassCalls;
+
+    cfh::g_probeSetTextColorTap.store(nullptr, std::memory_order_release);
+    g_textCausalTarget = nullptr;
+    bfo::Unsubclass(uButton);
+
+    const TextStats text9dM = MeasureText(text9dMapped.mode[0], kUButton);
+    const TextStats text9dB = MeasureText(text9dBypass.mode[0], kUButton);
+    const TextStats text9dR = MeasureText(text9dRestored.mode[0], kUButton);
+    const bool text9dSentinels =
+        uSentinelOk(text9dMapped) && uSentinelOk(text9dBypass) && uSentinelOk(text9dRestored);
+    const bool text9dRestoredSame =
+        RegionEqual(text9dMapped.mode[0], text9dRestored.mode[0], kUButton) &&
+        RegionEqual(text9dMapped.mode[1], text9dRestored.mode[1], kUButton);
+    if (!text9dSentinels || text9dMappedCalls == 0 || text9dBypassCalls == 0 ||
+        text9dRestoreCalls == 0 || !text9dRestoredSame)
+        text9dInfra = false;
+
+    std::printf("buttontext: 9d SetTextColor calls=%ld/%ld/%ld black=%ld inside-theme-text=%ld incoming=",
+                text9dMappedCalls, text9dBypassCalls, text9dRestoreCalls,
+                g_textCausalBlack.load(), g_textCausalInside.load());
+    PrintRgb(g_textCausalIncoming.load());
+    std::printf(" mapped=");
+    PrintRgb(g_textCausalMapped.load());
+    std::printf(" hist=");
+    for (int i = 0; i < g_textInputKinds; ++i) {
+        if (i) std::printf(",");
+        PrintRgb(g_textInputBins[i].color);
+        std::printf("x%ld", g_textInputBins[i].count);
+    }
+    std::printf(" DrawThemeText=%ld ex=%ld\n", uxo::g_text, uxo::g_textEx);
+    std::printf("buttontext: 9d mapped bg=");
+    PrintRgb(text9dM.bg);
+    std::printf(" t1=");
+    PrintRgb(text9dM.t1);
+    std::printf("x%ld t2=", text9dM.t1N);
+    PrintRgb(text9dM.t2);
+    std::printf("x%ld cr=%.1f\n", text9dM.t2N, ContrastRatio(text9dM.bg, text9dM.t1));
+    std::printf("buttontext: 9d bypass bg=");
+    PrintRgb(text9dB.bg);
+    std::printf(" t1=");
+    PrintRgb(text9dB.t1);
+    std::printf("x%ld t2=", text9dB.t1N);
+    PrintRgb(text9dB.t2);
+    std::printf("x%ld cr=%.1f\n", text9dB.t2N, ContrastRatio(text9dB.bg, text9dB.t1));
+    // Safety control for a themed v6 Static already covered by ColorFix.
+    // Compare normal product mapping with the same SetTextColor bypass while
+    // attributing only calls during this Static's paint.
+    g_textCausalCalls.store(0);
+    g_textCausalInside.store(0);
+    g_textInputKinds = 0;
+    for (auto& bin : g_textInputBins) bin = {CLR_INVALID, 0};
+    g_textCausalTarget = uTextStatic;
+    if (!bfo::Subclass(uTextStatic)) text9dInfra = false;
+    cfh::g_probeSetTextColorTap.store(&TextCausalTap, std::memory_order_release);
+    g_textCausalBypass.store(false);
+    const WindowShot text9dStaticMapped = uShoot(uTextStatic);
+    const long text9dStaticMappedCalls = g_textCausalCalls.load();
+    g_textCausalBypass.store(true);
+    const WindowShot text9dStaticBypass = uShoot(uTextStatic);
+    const long text9dStaticBypassCalls = g_textCausalCalls.load() - text9dStaticMappedCalls;
+    cfh::g_probeSetTextColorTap.store(nullptr, std::memory_order_release);
+    g_textCausalTarget = nullptr;
+    bfo::Unsubclass(uTextStatic);
+    const TextStats text9dSM = MeasureText(text9dStaticMapped.mode[0], kUTextStatic);
+    const TextStats text9dSB = MeasureText(text9dStaticBypass.mode[0], kUTextStatic);
+    if (!uSentinelOk(text9dStaticMapped) || !uSentinelOk(text9dStaticBypass) ||
+        text9dStaticMappedCalls == 0 || text9dStaticBypassCalls == 0)
+        text9dInfra = false;
+    std::printf("buttontext: 9d static calls=%ld/%ld inside-theme-text=%ld mapped=",
+                text9dStaticMappedCalls, text9dStaticBypassCalls, g_textCausalInside.load());
+    PrintRgb(text9dSM.bg); std::printf(":"); PrintRgb(text9dSM.t1);
+    std::printf("x%ld cr=%.1f bypass=", text9dSM.t1N, ContrastRatio(text9dSM.bg, text9dSM.t1));
+    PrintRgb(text9dSB.bg); std::printf(":"); PrintRgb(text9dSB.t1);
+    std::printf("x%ld cr=%.1f hist=", text9dSB.t1N, ContrastRatio(text9dSB.bg, text9dSB.t1));
+    for (int i = 0; i < g_textInputKinds; ++i) {
+        if (i) std::printf(","); PrintRgb(g_textInputBins[i].color);
+        std::printf("x%ld", g_textInputBins[i].count);
+    }
+    std::printf("\n");
+
+    std::printf("buttontext: 9d restored bg=");
+    PrintRgb(text9dR.bg);
+    std::printf(" t1=");
+    PrintRgb(text9dR.t1);
+    std::printf("x%ld t2=", text9dR.t1N);
+    PrintRgb(text9dR.t2);
+    std::printf("x%ld restored=%s sentinel=%s %s\n", text9dR.t2N,
+                text9dRestoredSame ? "SAME" : "DIFFERENT",
+                text9dSentinels ? "VALID" : "INVALID",
+                text9dInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
+
     ShowWindow(winU, SW_HIDE);  // never occludes the later captures of E/K/C/L
     Pump(100);
     if (!uInside || uMagentaFail || uHrFail || uTextShort || uEquivFail) uInfra = false;
@@ -1674,6 +1828,7 @@ int main(int argc, char** argv) {
     if (!ctlOk) infraOk = false;  // DeleteObject.pass has no valid control
     if (!bfInfra) infraOk = false;  // 9a infrastructure
     if (!uInfra) infraOk = false;   // 9c infrastructure
+    if (!text9dInfra) infraOk = false;  // 9d measurement infrastructure
     if (!uBehavior) behaviorOk = false;  // 9c gates G1-G3
     if (!observerAutotest || !observerPassive) infraOk = false;
     if (!policyOk) behaviorOk = false;
