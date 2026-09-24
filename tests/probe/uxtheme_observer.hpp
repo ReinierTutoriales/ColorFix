@@ -126,6 +126,8 @@ inline void ForgetTheme(HTHEME theme) noexcept {
         }
 }
 
+inline const wchar_t* ThemeClass(HTHEME theme) noexcept;
+
 inline bool IsKnownButtonClass(HTHEME theme) noexcept {
     const wchar_t* klass = ThemeClass(theme);
     if (!klass || klass[0] == L'?' || wcschr(klass, L';')) return false;
