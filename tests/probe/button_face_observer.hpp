@@ -1,11 +1,13 @@
 #pragma once
 
 // Probe increment 9a: causal characterization of the push-button face.
-// Probe-only; nothing here is product code. Temporary MinHook detours on five
-// classic primitives, plus an intercept hook that the UxTheme observer calls
-// from its existing DrawThemeBackground detour. All interventions apply only
-// while a candidate is active AND the call belongs to the target button's
-// paint (thread-local context set by a SetWindowLongPtrW subclass).
+// Probe-only; nothing here is product code. Temporary MinHook detours on four
+// classic primitives, a FillRect tap that the product FillRect hook calls
+// (increment 9b: the product owns user32!FillRect), plus an intercept hook
+// that the UxTheme observer calls from its existing DrawThemeBackground detour.
+// All interventions apply only while a candidate is active AND the call
+// belongs to the target button's paint (thread-local context set by a
+// SetWindowLongPtrW subclass).
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
@@ -50,6 +52,10 @@ using CreateSolidBrush_t = HBRUSH (WINAPI*)(COLORREF);
 // experiment never goes through the product mapping when it changes DC state.
 inline SetBkColor_t g_setBkColorRaw = &::SetBkColor;
 inline CreateSolidBrush_t g_createBrushRaw = &::CreateSolidBrush;
+using FillRect_t = int (WINAPI*)(HDC, const RECT*, HBRUSH);
+// Unhooked FillRect for the marker paint (the probe supplies the ColorFix
+// original), so the marker never re-enters the product hook or the tap.
+inline FillRect_t g_fillRectRaw = &::FillRect;
 inline HBRUSH g_markerBrush = nullptr;
 
 // Returns true when the call must be intervened. Counts every interception.
@@ -62,23 +68,45 @@ inline bool Attribute(int c, HDC dc) noexcept {
     return g_active.load(std::memory_order_relaxed) == c;
 }
 
-using FillRect_t = int (WINAPI*)(HDC, const RECT*, HBRUSH);
 using PatBlt_t = BOOL (WINAPI*)(HDC, int, int, int, int, DWORD);
 using ExtTextOutW_t = BOOL (WINAPI*)(HDC, int, int, UINT, const RECT*, LPCWSTR, UINT,
                                      const INT*);
 using DrawFrameControl_t = BOOL (WINAPI*)(HDC, LPRECT, UINT, UINT);
 using DrawEdge_t = BOOL (WINAPI*)(HDC, LPRECT, UINT, UINT);
 
-inline FillRect_t g_fillRectOrig = nullptr;
 inline PatBlt_t g_patBltOrig = nullptr;
 inline ExtTextOutW_t g_extTextOutOrig = nullptr;
 inline DrawFrameControl_t g_drawFrameControlOrig = nullptr;
 inline DrawEdge_t g_drawEdgeOrig = nullptr;
-inline void* g_targets[5]{};
+inline void* g_targets[5]{};  // [0] unused: FillRect goes through the tap
 
-inline int WINAPI FillRect_Hook(HDC dc, const RECT* r, HBRUSH brush) {
-    if (Attribute(kFillRect, dc)) return g_fillRectOrig(dc, r, g_markerBrush);
-    return g_fillRectOrig(dc, r, brush);
+// Increment 9b measurement: the brush argument of every FillRect call that
+// belongs to a target button's paint, recorded before any substitution.
+struct BrushSample {
+    HWND target;
+    HBRUSH brush;
+};
+inline constexpr long kMaxBrushSamples = 1024;
+inline BrushSample g_brushSamples[kMaxBrushSamples]{};
+inline std::atomic<long> g_brushSampleCount{0};
+inline std::atomic<long> g_brushSamplesDropped{0};
+
+inline void RecordBrush(HWND target, HBRUSH brush) noexcept {
+    const long slot = g_brushSampleCount.fetch_add(1, std::memory_order_relaxed);
+    if (slot >= kMaxBrushSamples) {
+        g_brushSamplesDropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    g_brushSamples[slot] = {target, brush};
+}
+
+// Called by the product FillRect hook with the caller's brush, before the
+// product decision. Returns the brush the product hook continues with.
+inline HBRUSH FillRectTap(HDC dc, const RECT* /*r*/, HBRUSH brush) {
+    const bool intervene = Attribute(kFillRect, dc);
+    const HWND target = g_target.load(std::memory_order_relaxed);
+    if (target && t_painting == target) RecordBrush(target, brush);
+    return intervene ? g_markerBrush : brush;
 }
 
 inline BOOL WINAPI PatBlt_Hook(HDC dc, int x, int y, int w, int h, DWORD rop) {
@@ -120,7 +148,7 @@ inline bool DrawThemeIntercept(const wchar_t* klass, HDC dc, int part, int /*sta
                                const RECT* r) {
     if (part != 1 || !r || !klass || std::wcscmp(klass, L"Button") != 0) return false;
     if (!Attribute(kDrawThemeBackground, dc)) return false;
-    (g_fillRectOrig ? g_fillRectOrig : &::FillRect)(dc, r, g_markerBrush);
+    g_fillRectRaw(dc, r, g_markerBrush);
     return true;
 }
 
@@ -148,9 +176,8 @@ inline bool CreateAndEnable(const wchar_t* dll, const char* name, void* hook, vo
 inline bool Install() {
     g_markerBrush = g_createBrushRaw(kMarker);
     if (!g_markerBrush) return false;
-    return CreateAndEnable(L"user32.dll", "FillRect", reinterpret_cast<void*>(&FillRect_Hook),
-                           reinterpret_cast<void**>(&g_fillRectOrig), &g_targets[0]) &&
-           CreateAndEnable(L"gdi32.dll", "PatBlt", reinterpret_cast<void*>(&PatBlt_Hook),
+    // FillRect: no detour here; the probe wires FillRectTap into the product hook.
+    return CreateAndEnable(L"gdi32.dll", "PatBlt", reinterpret_cast<void*>(&PatBlt_Hook),
                            reinterpret_cast<void**>(&g_patBltOrig), &g_targets[1]) &&
            CreateAndEnable(L"gdi32.dll", "ExtTextOutW", reinterpret_cast<void*>(&ExtTextOutW_Hook),
                            reinterpret_cast<void**>(&g_extTextOutOrig), &g_targets[2]) &&
@@ -169,7 +196,6 @@ inline void Uninstall() {
         MH_RemoveHook(target);
         target = nullptr;
     }
-    g_fillRectOrig = nullptr;
     if (g_markerBrush) {
         DeleteObject(g_markerBrush);
         g_markerBrush = nullptr;

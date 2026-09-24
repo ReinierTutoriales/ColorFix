@@ -71,7 +71,12 @@ jobs:
             }
             foreach ($g in $groups.GetEnumerator()) {
               $lines = $out | Select-String $g.Value | ForEach-Object { $_.Line }
-              Write-Output "::notice title=probe-hooks ${{ matrix.preset }} $order $($g.Key)::$(($lines -join '%0A'))"
+              $notice = "::notice title=probe-hooks ${{ matrix.preset }} $order $($g.Key)::$(($lines -join '%0A'))"
+              # Guard, not a gate: measure the exact string handed to ::notice.
+              if ($notice.Length -gt 4000) {
+                Write-Output "::warning title=notice-length ${{ matrix.preset }} $order $($g.Key)::$($notice.Length) chars > 4000; the annotation may be truncated"
+              }
+              Write-Output $notice
             }
           }
           exit $final
