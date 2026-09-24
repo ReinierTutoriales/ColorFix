@@ -747,11 +747,15 @@ int main(int argc, char** argv) {
     // Values needed for expectations, read before any hook is enabled.
     const COLORREF baseSysWindow = GetSysColor(COLOR_WINDOW);
     const HBRUSH baseSysBrush = GetSysColorBrush(COLOR_WINDOW);
-    const COLORREF expWindow = colorfix::MapSystemColor(COLOR_WINDOW, baseSysWindow);
-    const COLORREF expLiteral = colorfix::MapLiteralColor(kWhite);
-    const COLORREF exp3dFace = colorfix::MapSystemColor(COLOR_3DFACE, GetSysColor(COLOR_3DFACE));
+    // The probe runs the Default palette (11a keeps its values unchanged).
+    constexpr colorfix::Palette kPal = colorfix::Palette::Default;
+    const COLORREF expWindow = colorfix::MapSystemColor(kPal, COLOR_WINDOW, baseSysWindow);
+    const COLORREF expLiteralText = colorfix::MapLiteralText(kPal, kWhite);
+    const COLORREF expLiteral = colorfix::MapLiteralFill(kPal, kWhite);
+    const COLORREF exp3dFace =
+        colorfix::MapSystemColor(kPal, COLOR_3DFACE, GetSysColor(COLOR_3DFACE));
     const COLORREF expWindowText =
-        colorfix::MapSystemColor(COLOR_WINDOWTEXT, GetSysColor(COLOR_WINDOWTEXT));
+        colorfix::MapSystemColor(kPal, COLOR_WINDOWTEXT, GetSysColor(COLOR_WINDOWTEXT));
     std::printf("expect: COLOR_WINDOW ");
     PrintRgb(baseSysWindow); std::printf("->"); PrintRgb(expWindow);
     std::printf(", literal white ");
@@ -761,7 +765,7 @@ int main(int argc, char** argv) {
     // Runtime policy: explicit ForceDark with real Windows signals keeps
     // increments 1-7 comparable. A real signal read failure invalidates the run.
     const colorfix::runtime::RefreshResult initial =
-        colorfix::runtime::RefreshPolicy(colorfix::policy::Mode::ForceDark);
+        colorfix::runtime::RefreshPolicy({colorfix::policy::Mode::ForceDark, kPal});
     std::printf("runtime: initial mode=ForceDark signals=%s hc=%d light=%d active=%d\n",
                 initial.signalsOk ? "OK" : "FAILED", initial.signals.highContrast ? 1 : 0,
                 initial.signals.appsUseLightTheme ? 1 : 0, initial.after ? 1 : 0);
@@ -868,7 +872,7 @@ int main(int argc, char** argv) {
     });
     run("SetTextColor", HookId::SetTextColor, [&](Autotest& t) {
         SetTextColor(testDc, kWhite);
-        t.expected = expLiteral;
+        t.expected = expLiteralText;
         t.observed = GetTextColor(testDc);
         t.valueOk = t.observed == t.expected;
     });
@@ -1039,7 +1043,7 @@ int main(int argc, char** argv) {
     const HBRUSH sysHighlight = cfh::GetSysColorBrush_Original(COLOR_HIGHLIGHT);
     std::printf("detail: FillRect.inputs face=%p highlight=%p unmapped-role=%d\n",
                 static_cast<void*>(sysFace), static_cast<void*>(sysHighlight),
-                colorfix::MapSystemColor(COLOR_HIGHLIGHT, origHighlight) == origHighlight ? 1 : 0);
+                colorfix::MapSystemColor(colorfix::Palette::Default, COLOR_HIGHLIGHT, origHighlight) == origHighlight ? 1 : 0);
     struct FillCase {
         const char* name;
         HBRUSH brush;
@@ -1063,7 +1067,7 @@ int main(int argc, char** argv) {
         {"FillRect.unmapped",  sysHighlight, sigOn,         origHighlight, 0, 0},
         {"FillRect.stock", static_cast<HBRUSH>(cfh::GetStockObject_Original(WHITE_BRUSH)),
                                              sigOn,         kWhite,        0, 0},
-        {"FillRect.semantic",  cfh::SemanticBrush(COLOR_BTNFACE),
+        {"FillRect.semantic",  cfh::SemanticBrush(colorfix::Palette::Default, COLOR_BTNFACE),
                                              sigOn,         exp3dFace,     0, 0},
         {"FillRect.pseudo", reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1)),
                                              sigOn,         CLR_INVALID,   0, 1},
@@ -1072,7 +1076,7 @@ int main(int argc, char** argv) {
     for (const auto& fc : fillCases) {
         run(fc.name, HookId::FillRect, [&](Autotest& t) {
             const bool off = std::strcmp(fc.name, "FillRect.sys-off") == 0;
-            cfp9::Publish(off ? cfp9::Mode::Disabled : cfp9::Mode::ForceDark, fc.signals);
+            cfp9::Publish(off ? cfp9::Mode::Disabled : cfp9::Mode::ForceDark, colorfix::Palette::Default, fc.signals);
             const long sub0 = cfh::g_fillRectSubstituted.load();
             const long ps0 = cfh::g_fillRectPseudo.load();
             t.expected = fc.expected != CLR_INVALID ? fc.expected : fillCenter(fc.brush, true);
@@ -1085,7 +1089,7 @@ int main(int argc, char** argv) {
                 std::printf("detail: %s substitutions=%ld pseudo=%ld\n", fc.name, sub, ps);
         });
     }
-    cfp9::Publish(cfp9::Mode::ForceDark, initial.signals);  // back to the run's state
+    cfp9::Publish(cfp9::Mode::ForceDark, colorfix::Palette::Default, initial.signals);  // back to the run's state
     DeleteObject(sameColor);
 
     // Identity cache: filled from the exports before any hook existed, it must
@@ -1215,7 +1219,7 @@ int main(int argc, char** argv) {
     bool policyOk = true;
     for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); ++i) {
         const PolicyStep& st = steps[i];
-        cfp::Publish(st.mode, st.signals);
+        cfp::Publish(st.mode, colorfix::Palette::Default, st.signals);
         const bool active = cfp::Active();
         const WindowShot now[3] = {Shoot(winE), Shoot(winK), Shoot(winC)};
         const WindowShot* base[3] = {&baseE, &baseK, &baseC};
@@ -1274,7 +1278,7 @@ int main(int argc, char** argv) {
                         same ? "PASS" : "FAIL");
         }
     }
-    cfp::Publish(cfp::Mode::ForceDark, {});
+    cfp::Publish(cfp::Mode::ForceDark, colorfix::Palette::Default, {});
 
     // ------------------------------------------ Phase 9a: button face causality
     // Policy ON, product hooks live. Candidates are intervened one at a time,
@@ -1576,7 +1580,7 @@ int main(int argc, char** argv) {
                     wr.left, wr.top, wr.right, wr.bottom, mi.rcMonitor.left, mi.rcMonitor.top,
                     mi.rcMonitor.right, mi.rcMonitor.bottom, uInside ? 1 : 0);
     }
-    cfp::Publish(cfp::Mode::ForceDark, {});
+    cfp::Publish(cfp::Mode::ForceDark, colorfix::Palette::Default, {});
     // Warm-up: in run 221 the first capture of U gave a black button interior
     // (themed=000000) in all six processes while the themed draws were
     // observed. The first capture is kept as a reported finding and is not
@@ -1674,7 +1678,7 @@ int main(int argc, char** argv) {
             Pump(100);
         }
         for (int on = 0; on < 2; ++on) {
-            cfp::Publish(on ? cfp::Mode::ForceDark : cfp::Mode::Disabled, {});
+            cfp::Publish(on ? cfp::Mode::ForceDark : cfp::Mode::Disabled, colorfix::Palette::Default, {});
             TextStats ts[4][2];
             int agree = 0;
             for (int sIdx = 0; sIdx < 4; ++sIdx) {
@@ -1719,7 +1723,7 @@ int main(int argc, char** argv) {
             Pump(100);
         }
     }
-    cfp::Publish(cfp::Mode::ForceDark, {});
+    cfp::Publish(cfp::Mode::ForceDark, colorfix::Palette::Default, {});
     std::printf("buttontext: product push N/P=000000x582 D=838383 %s\n",
                 productTextGate ? "PASS" : "HOOK_BEHAVIOR_FAILURE");
 
@@ -2185,7 +2189,8 @@ int main(int argc, char** argv) {
     DWORD origSize = sizeof(origLight);
     const LSTATUS origStatus = RegGetValueW(HKEY_CURRENT_USER, kPersonalize, L"AppsUseLightTheme",
                                             RRF_RT_REG_DWORD, nullptr, &origLight, &origSize);
-    const bool listenerOk = cfr::StartListener(cfp::Mode::FollowSystem);
+    const bool listenerOk =
+        cfr::StartListener({cfp::Mode::FollowSystem, colorfix::Palette::Default});
     if (!listenerOk) infraOk = false;
     std::printf("runtime: listener %s\n", listenerOk ? "STARTED" : "INFRASTRUCTURE_FAILURE");
 

@@ -234,10 +234,13 @@ inline HRESULT WINAPI DrawThemeTextEx_Hook(HTHEME theme, HDC dc, int part, int s
     return DrawThemeTextEx_Original(theme, dc, part, state, text, count, flags, rc, opts);
 }
 
-// One process-lifetime brush per system color index, derived from core roles.
-// COLOR_MENUBAR (30) is the highest defined index.
+// One process-lifetime brush per (palette, system color index), derived from
+// core roles. Brushes are never recolored nor deleted (applications may hold
+// the handles), so each palette owns its own bank: a palette switch selects
+// the other bank instead of invalidating anything. COLOR_MENUBAR (30) is the
+// highest defined index.
 inline constexpr int kSysColorCount = COLOR_MENUBAR + 1;
-inline std::atomic<HBRUSH> g_brushes[kSysColorCount];
+inline std::atomic<HBRUSH> g_brushes[colorfix::kPaletteCount][kSysColorCount];
 
 // Identity cache of the system color brush handles, one per index. Filled
 // before any hook exists (RegisterPhase1Hooks), never inside a detour. Whether
@@ -272,20 +275,25 @@ inline int SystemBrushIndex(HBRUSH brush) {
 
 inline bool IsColorFixBrush(HGDIOBJ obj) {
     if (!obj) return false;
-    for (const auto& slot : g_brushes)
-        if (slot.load(std::memory_order_relaxed) == obj) return true;
+    for (const auto& bank : g_brushes)
+        for (const auto& slot : bank)
+            if (slot.load(std::memory_order_relaxed) == obj) return true;
     return false;
 }
 
-// Returns the ColorFix brush for a system color index, or nullptr when the
-// role is not remapped (caller falls back to the original API).
-inline HBRUSH SemanticBrush(int index) {
+// Returns the ColorFix brush for a system color index in `palette`, or
+// nullptr when the role is not remapped (caller falls back to the original
+// API). The palette is captured by the caller from one policy::Current() load
+// BEFORE this call, and both the color and the slot derive from it, so a
+// concurrent palette switch cannot publish an AMOLED brush in the Default
+// bank or vice versa.
+inline HBRUSH SemanticBrush(colorfix::Palette palette, int index) {
     if (index < 0 || index >= kSysColorCount) return nullptr;
     const COLORREF original = static_cast<COLORREF>(GetSysColor_Original(index));
-    const COLORREF mapped = colorfix::MapSystemColor(index, original);
+    const COLORREF mapped = colorfix::MapSystemColor(palette, index, original);
     if (mapped == original) return nullptr;
 
-    auto& slot = g_brushes[index];
+    auto& slot = g_brushes[colorfix::PaletteIndex(palette)][index];
     if (HBRUSH brush = slot.load(std::memory_order_acquire)) return brush;
 
     HBRUSH created = CreateSolidBrush_Original(mapped);  // bypass literal mapping
@@ -300,32 +308,39 @@ inline HBRUSH SemanticBrush(int index) {
 
 inline DWORD WINAPI GetSysColor_Hook(int index) {
     COLORFIX_PROBE_HIT(GetSysColor);
-    if (!colorfix::policy::Active()) return GetSysColor_Original(index);
+    const colorfix::policy::State st = colorfix::policy::Current();
+    if (!st.active) return GetSysColor_Original(index);
     const COLORREF original = static_cast<COLORREF>(GetSysColor_Original(index));
-    return colorfix::MapSystemColor(index, original);
+    return colorfix::MapSystemColor(st.palette, index, original);
 }
 
 inline HBRUSH WINAPI GetSysColorBrush_Hook(int index) {
     COLORFIX_PROBE_HIT(GetSysColorBrush);
-    if (!colorfix::policy::Active()) return GetSysColorBrush_Original(index);
-    if (HBRUSH brush = SemanticBrush(index)) return brush;
+    const colorfix::policy::State st = colorfix::policy::Current();
+    if (!st.active) return GetSysColorBrush_Original(index);
+    if (HBRUSH brush = SemanticBrush(st.palette, index)) return brush;
     return GetSysColorBrush_Original(index);
 }
 
 inline HGDIOBJ WINAPI GetStockObject_Hook(int object) {
     COLORFIX_PROBE_HIT(GetStockObject);
-    if (!colorfix::policy::Active()) return GetStockObject_Original(object);
+    const colorfix::policy::State st = colorfix::policy::Current();
+    if (!st.active) return GetStockObject_Original(object);
     // Only WHITE_BRUSH is treated as a window background. BLACK_BRUSH is used
     // for frames, text and masks: leave it untouched in Phase 1.
     if (object == WHITE_BRUSH)
-        if (HBRUSH brush = SemanticBrush(COLOR_WINDOW)) return brush;
+        if (HBRUSH brush = SemanticBrush(st.palette, COLOR_WINDOW)) return brush;
     return GetStockObject_Original(object);
 }
 
 inline COLORREF WINAPI SetTextColor_Hook(HDC dc, COLORREF color) {
     COLORFIX_PROBE_HIT(SetTextColor);
-    if (!colorfix::policy::Active()) return SetTextColor_Original(dc, color);
-    COLORREF mapped = colorfix::MapLiteralColor(color);
+    const colorfix::policy::State st = colorfix::policy::Current();
+    if (!st.active) return SetTextColor_Original(dc, color);
+    COLORREF mapped = colorfix::MapLiteralText(st.palette, color);
+    // 9f exception takes precedence over MapLiteralText in every palette:
+    // known single-class Button theme, part 1 (BP_PUSHBUTTON) keeps the
+    // caller's color, or the themed push button text becomes unreadable.
     const ThemeTextContext text = CurrentThemeText();
     if (text.part == 1 && KnownButtonTheme(text.theme)) mapped = color;
 #if defined(COLORFIX_PROBE)
@@ -337,14 +352,16 @@ inline COLORREF WINAPI SetTextColor_Hook(HDC dc, COLORREF color) {
 
 inline COLORREF WINAPI SetBkColor_Hook(HDC dc, COLORREF color) {
     COLORFIX_PROBE_HIT(SetBkColor);
-    if (!colorfix::policy::Active()) return SetBkColor_Original(dc, color);
-    return SetBkColor_Original(dc, colorfix::MapLiteralColor(color));
+    const colorfix::policy::State st = colorfix::policy::Current();
+    if (!st.active) return SetBkColor_Original(dc, color);
+    return SetBkColor_Original(dc, colorfix::MapLiteralFill(st.palette, color));
 }
 
 inline HBRUSH WINAPI CreateSolidBrush_Hook(COLORREF color) {
     COLORFIX_PROBE_HIT(CreateSolidBrush);
-    if (!colorfix::policy::Active()) return CreateSolidBrush_Original(color);
-    return CreateSolidBrush_Original(colorfix::MapLiteralColor(color));
+    const colorfix::policy::State st = colorfix::policy::Current();
+    if (!st.active) return CreateSolidBrush_Original(color);
+    return CreateSolidBrush_Original(colorfix::MapLiteralFill(st.palette, color));
 }
 
 inline BOOL WINAPI DeleteObject_Hook(HGDIOBJ obj) {
@@ -361,10 +378,10 @@ inline BOOL WINAPI DeleteObject_Hook(HGDIOBJ obj) {
 // increment 1), so WM_ERASEBKGND is intercepted at DefWindowProc itself.
 // Only system-color class brushes (COLOR_x + 1) are remapped; real brush
 // handles and anything else fall through to the original.
-inline bool EraseWithSemanticBrush(HWND hwnd, HDC dc) {
+inline bool EraseWithSemanticBrush(colorfix::Palette palette, HWND hwnd, HDC dc) {
     const ULONG_PTR cls = GetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND);
     if (cls == 0 || cls > static_cast<ULONG_PTR>(kSysColorCount)) return false;
-    HBRUSH brush = SemanticBrush(static_cast<int>(cls) - 1);
+    HBRUSH brush = SemanticBrush(palette, static_cast<int>(cls) - 1);
     if (!brush) return false;
     RECT rc;
     if (!GetClientRect(hwnd, &rc)) return false;
@@ -398,15 +415,16 @@ inline LRESULT AdjustCtlColor(UINT msg, WPARAM wp, LRESULT result) {
     CtlColorDefault d;
     if (!CtlColorDefaultFor(msg, &d)) return result;
     COLORFIX_PROBE_HIT(DefWindowProcCtlColor);
-    if (!colorfix::policy::Active()) return result;
+    const colorfix::policy::State st = colorfix::policy::Current();
+    if (!st.active) return result;
     if (result != reinterpret_cast<LRESULT>(GetSysColorBrush_Original(d.brush))) return result;
-    HBRUSH brush = SemanticBrush(d.brush);
+    HBRUSH brush = SemanticBrush(st.palette, d.brush);
     if (!brush) return result;
     HDC dc = reinterpret_cast<HDC>(wp);
     SetTextColor_Original(dc, colorfix::MapSystemColor(
-        d.text, static_cast<COLORREF>(GetSysColor_Original(d.text))));
+        st.palette, d.text, static_cast<COLORREF>(GetSysColor_Original(d.text))));
     SetBkColor_Original(dc, colorfix::MapSystemColor(
-        d.bk, static_cast<COLORREF>(GetSysColor_Original(d.bk))));
+        st.palette, d.bk, static_cast<COLORREF>(GetSysColor_Original(d.bk))));
     return reinterpret_cast<LRESULT>(brush);
 }
 
@@ -414,7 +432,8 @@ inline LRESULT WINAPI DefWindowProcW_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM
     // Counters record interception before the policy gate, as in every hook.
     if (msg == WM_ERASEBKGND) {
         COLORFIX_PROBE_HIT(DefWindowProcErase);
-        if (colorfix::policy::Active() && EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp)))
+        const colorfix::policy::State st = colorfix::policy::Current();
+        if (st.active && EraseWithSemanticBrush(st.palette, hwnd, reinterpret_cast<HDC>(wp)))
             return 1;
     }
     return AdjustCtlColor(msg, wp, DefWindowProcW_Original(hwnd, msg, wp, lp));
@@ -423,7 +442,8 @@ inline LRESULT WINAPI DefWindowProcW_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM
 inline LRESULT WINAPI DefWindowProcA_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_ERASEBKGND) {
         COLORFIX_PROBE_HIT(DefWindowProcErase);
-        if (colorfix::policy::Active() && EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp)))
+        const colorfix::policy::State st = colorfix::policy::Current();
+        if (st.active && EraseWithSemanticBrush(st.palette, hwnd, reinterpret_cast<HDC>(wp)))
             return 1;
     }
     return AdjustCtlColor(msg, wp, DefWindowProcA_Original(hwnd, msg, wp, lp));
@@ -446,10 +466,12 @@ inline int WINAPI FillRect_Hook(HDC dc, const RECT* rc, HBRUSH brush) {
     if (const FillRectTap_t tap = g_probeFillRectTap.load(std::memory_order_acquire))
         brush = tap(dc, rc, brush);
 #endif
-    if (!brush || pseudo || !colorfix::policy::Active()) return FillRect_Original(dc, rc, brush);
+    if (!brush || pseudo) return FillRect_Original(dc, rc, brush);
+    const colorfix::policy::State st = colorfix::policy::Current();
+    if (!st.active) return FillRect_Original(dc, rc, brush);
     const int index = SystemBrushIndex(brush);
     if (index >= 0) {
-        if (HBRUSH semantic = SemanticBrush(index)) {
+        if (HBRUSH semantic = SemanticBrush(st.palette, index)) {
 #if defined(COLORFIX_PROBE)
             g_fillRectSubstituted.fetch_add(1, std::memory_order_relaxed);
 #endif
