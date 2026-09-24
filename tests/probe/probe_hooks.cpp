@@ -1465,22 +1465,57 @@ int main(int argc, char** argv) {
     // Run 221 reported INFRASTRUCTURE_FAILURE without naming the condition:
     // each infrastructure condition is now counted separately.
     long uMagentaFail = 0, uHrFail = 0, uTextShort = 0, uEquivFail = 0;
+    // Runs 223/224: U captures were intermittently all black (magenta sentinel
+    // included) for up to ~8 capture modes, then recovered. A shot is retried
+    // until the sentinel is valid in both modes (bounded); the sentinel does
+    // not depend on ColorFix, so the retry cannot select a rendering result.
+    // Retries are reported; only a shot still invalid after the bound counts.
+    constexpr int kUMaxAttempts = 20;
+    long uRetries = 0, uMaxAttempts = 0;
     const HWND uButton = GetDlgItem(winU, kButtonId);
     const HWND uClassic = GetDlgItem(winU, kClassicId);
     if (!uButton || !uClassic) uInfra = false;
+    auto uSentinelOk = [](const WindowShot& s) {
+        for (int m = 0; m < 2; ++m) {
+            COLORREF c = CLR_INVALID;
+            if (s.mode[m].px.empty() || !SurfaceColor(s.mode[m], kMagentaRect, &c) ||
+                c != kMagenta)
+                return false;
+        }
+        return true;
+    };
     auto uShoot = [&](HWND button) {
         if (button)
             RedrawWindow(button, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
         WindowShot s = Shoot(winU);
-        for (int m = 0; m < 2; ++m) {
-            COLORREF c = CLR_INVALID;
-            if (s.mode[m].px.empty() || !SurfaceColor(s.mode[m], kMagentaRect, &c) ||
-                c != kMagenta)
-                ++uMagentaFail;
+        int attempts = 1;
+        while (!uSentinelOk(s) && attempts < kUMaxAttempts) {
+            Pump(100);
+            s = Shoot(winU);
+            ++attempts;
         }
+        uRetries += attempts - 1;
+        if (attempts > uMaxAttempts) uMaxAttempts = attempts;
+        if (!uSentinelOk(s)) ++uMagentaFail;
         return s;
     };
+    {
+        // Geometry evidence for the intermittent black captures.
+        RECT wr{};
+        GetWindowRect(winU, &wr);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        const bool haveMon =
+            GetMonitorInfoW(MonitorFromWindow(winU, MONITOR_DEFAULTTONEAREST), &mi) != 0;
+        const bool inside = haveMon && wr.left >= mi.rcMonitor.left &&
+                            wr.top >= mi.rcMonitor.top && wr.right <= mi.rcMonitor.right &&
+                            wr.bottom <= mi.rcMonitor.bottom;
+        std::printf("buttontext: detail window=(%ld,%ld)-(%ld,%ld) monitor=(%ld,%ld)-(%ld,%ld)"
+                    " inside=%d\n",
+                    wr.left, wr.top, wr.right, wr.bottom, mi.rcMonitor.left, mi.rcMonitor.top,
+                    mi.rcMonitor.right, mi.rcMonitor.bottom, inside ? 1 : 0);
+    }
     cfp::Publish(cfp::Mode::ForceDark, {});
     // Warm-up: in run 221 the first capture of U gave a black button interior
     // (themed=000000) in all six processes while the themed draws were
@@ -1617,8 +1652,8 @@ int main(int argc, char** argv) {
     cfp::Publish(cfp::Mode::ForceDark, {});
     if (uMagentaFail || uHrFail || uTextShort || uEquivFail) uInfra = false;
     std::printf("buttontext: infrastructure magenta-fail=%ld hr-fail=%ld text-short=%ld"
-                " classic-equiv-fail=%ld %s\n",
-                uMagentaFail, uHrFail, uTextShort, uEquivFail,
+                " classic-equiv-fail=%ld retries=%ld max-attempts=%ld %s\n",
+                uMagentaFail, uHrFail, uTextShort, uEquivFail, uRetries, uMaxAttempts,
                 uInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
 
     // ------------------------------------------------------------ report
