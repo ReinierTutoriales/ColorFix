@@ -191,7 +191,7 @@ inline HTHEME WINAPI OpenThemeData_Hook(HWND hwnd, LPCWSTR klass) {
 }
 inline HTHEME WINAPI OpenThemeDataForDpi_Hook(HWND hwnd, LPCWSTR klass, UINT dpi) {
     HTHEME theme = OpenThemeDataForDpi_Original(hwnd, klass, dpi);
-    RememberTheme(theme, klass);
+    if (g_uxthemeHooks.load(std::memory_order_acquire)) RememberTheme(theme, klass);
 #if defined(COLORFIX_PROBE)
     if (const auto tap = g_probeThemeOpenTap.load(std::memory_order_acquire)) tap(theme, klass);
 #endif
@@ -199,7 +199,7 @@ inline HTHEME WINAPI OpenThemeDataForDpi_Hook(HWND hwnd, LPCWSTR klass, UINT dpi
 }
 inline HTHEME WINAPI OpenThemeDataEx_Hook(HWND hwnd, LPCWSTR klass, DWORD flags) {
     HTHEME theme = OpenThemeDataEx_Original(hwnd, klass, flags);
-    RememberTheme(theme, klass);
+    if (g_uxthemeHooks.load(std::memory_order_acquire)) RememberTheme(theme, klass);
 #if defined(COLORFIX_PROBE)
     if (const auto tap = g_probeThemeOpenTap.load(std::memory_order_acquire)) tap(theme, klass);
 #endif
@@ -226,7 +226,7 @@ inline HRESULT WINAPI DrawThemeText_Hook(HTHEME theme, HDC dc, int part, int sta
 inline HRESULT WINAPI DrawThemeTextEx_Hook(HTHEME theme, HDC dc, int part, int state,
                                            LPCWSTR text, int count, DWORD flags,
                                            RECT* rc, const DTTOPTS* opts) {
-    ThemeTextScope scope(theme, part);
+    ThemeTextScope scope(g_uxthemeHooks.load(std::memory_order_acquire) ? theme : nullptr, part);
 #if defined(COLORFIX_PROBE)
     if (const auto tap = g_probeThemeTextTap.load(std::memory_order_acquire))
         tap(theme, part, KnownButtonTheme(theme));
