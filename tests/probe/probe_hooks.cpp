@@ -80,6 +80,7 @@ std::atomic<long> g_textPartCalls{0};
 std::atomic<long> g_textPartInterventions{0};
 std::atomic<long> g_textPartUnknown{0};
 std::atomic<long> g_textPartWrong{0};
+std::atomic<HTHEME> g_textPartLastTheme{nullptr};
 
 COLORREF TextPartTap(HDC, COLORREF incoming, COLORREF mapped) {
     if (!g_textCausalTarget || colorfix::probe::button_face::t_painting != g_textCausalTarget)
@@ -87,6 +88,7 @@ COLORREF TextPartTap(HDC, COLORREF incoming, COLORREF mapped) {
     g_textPartCalls.fetch_add(1, std::memory_order_relaxed);
     const uxo::TextContext ctx = uxo::CurrentTextContext();
     if (!ctx.theme) return mapped;
+    g_textPartLastTheme.store(ctx.theme, std::memory_order_relaxed);
     const wchar_t* klass = uxo::ThemeClass(ctx.theme);
     const bool unknown = !klass || klass[0] == L'?' || !uxo::IsKnownButtonClass(ctx.theme);
     if (unknown) {
@@ -1976,6 +1978,7 @@ int main(int argc, char** argv) {
         g_textPartInterventions.store(0);
         g_textPartUnknown.store(0);
         g_textPartWrong.store(0);
+        g_textPartLastTheme.store(nullptr);
         cfh::g_probeSetTextColorTap.store(&TextPartTap, std::memory_order_release);
 
         g_textPartBypass.store(false);
@@ -1983,17 +1986,20 @@ int main(int argc, char** argv) {
         const long controlCalls = g_textPartCalls.load();
         const long controlUnknown = g_textPartUnknown.load();
         const long controlWrong = g_textPartWrong.load();
+        const HTHEME controlTheme = g_textPartLastTheme.load();
 
         g_textPartCalls.store(0);
         g_textPartInterventions.store(0);
         g_textPartUnknown.store(0);
         g_textPartWrong.store(0);
+        g_textPartLastTheme.store(nullptr);
         g_textPartBypass.store(true);
         const WindowShot experiment = uShoot(h);
         const long experimentCalls = g_textPartCalls.load();
         const long interventions = g_textPartInterventions.load();
         const long experimentUnknown = g_textPartUnknown.load();
         const long experimentWrong = g_textPartWrong.load();
+        const HTHEME experimentTheme = g_textPartLastTheme.load();
 
         g_textPartBypass.store(false);
         cfh::g_probeSetTextColorTap.store(nullptr, std::memory_order_release);
@@ -2027,9 +2033,10 @@ int main(int argc, char** argv) {
         const bool scoped = interventions == 0 || (push && experimentWrong == 0);
         if (!pixels) text9fPixels = false;
         if (!scoped) text9fScoped = false;
-        std::printf("buttontext: 9f %s calls=%ld/%ld interventions=%ld unknown=%ld/%ld nonpart=%ld/%ld"
+        std::printf("buttontext: 9f %s theme=%p/%p calls=%ld/%ld interventions=%ld unknown=%ld/%ld nonpart=%ld/%ld"
                     " m0=%ld/%ld/%ld m1=%ld/%ld/%ld %s\n",
-                    name, controlCalls, experimentCalls, interventions,
+                    name, static_cast<void*>(controlTheme), static_cast<void*>(experimentTheme),
+                    controlCalls, experimentCalls, interventions,
                     controlUnknown, experimentUnknown, controlWrong, experimentWrong,
                     changed[0], exact[0], other[0], changed[1], exact[1], other[1],
                     pixels && scoped ? "PASS" : "FAIL");
