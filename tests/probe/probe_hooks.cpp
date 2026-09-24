@@ -1500,21 +1500,32 @@ int main(int argc, char** argv) {
         if (!uSentinelOk(s)) ++uMagentaFail;
         return s;
     };
+    // Geometry. Run 226 measured U at (780,100)-(1100,300) on a 1024x768
+    // monitor: partly outside it in all six processes. The other windows
+    // leave no free 320x200 area inside the monitor, and moving them would
+    // change closed setups. U therefore stays where it is for every earlier
+    // phase and is moved on top, fully inside the monitor, only for this
+    // phase, during which no other window is captured; it is hidden when the
+    // phase ends, before any later capture of the other windows.
+    bool uInside = false;
     {
-        // Geometry evidence for the intermittent black captures.
-        RECT wr{};
-        GetWindowRect(winU, &wr);
         MONITORINFO mi{};
         mi.cbSize = sizeof(mi);
         const bool haveMon =
             GetMonitorInfoW(MonitorFromWindow(winU, MONITOR_DEFAULTTONEAREST), &mi) != 0;
-        const bool inside = haveMon && wr.left >= mi.rcMonitor.left &&
-                            wr.top >= mi.rcMonitor.top && wr.right <= mi.rcMonitor.right &&
-                            wr.bottom <= mi.rcMonitor.bottom;
+        RECT wr{};
+        GetWindowRect(winU, &wr);
+        if (haveMon)
+            SetWindowPos(winU, HWND_TOP, mi.rcMonitor.right - (wr.right - wr.left),
+                         mi.rcMonitor.top, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        Pump(200);
+        GetWindowRect(winU, &wr);
+        uInside = haveMon && wr.left >= mi.rcMonitor.left && wr.top >= mi.rcMonitor.top &&
+                  wr.right <= mi.rcMonitor.right && wr.bottom <= mi.rcMonitor.bottom;
         std::printf("buttontext: detail window=(%ld,%ld)-(%ld,%ld) monitor=(%ld,%ld)-(%ld,%ld)"
                     " inside=%d\n",
                     wr.left, wr.top, wr.right, wr.bottom, mi.rcMonitor.left, mi.rcMonitor.top,
-                    mi.rcMonitor.right, mi.rcMonitor.bottom, inside ? 1 : 0);
+                    mi.rcMonitor.right, mi.rcMonitor.bottom, uInside ? 1 : 0);
     }
     cfp::Publish(cfp::Mode::ForceDark, {});
     // Warm-up: in run 221 the first capture of U gave a black button interior
@@ -1650,11 +1661,13 @@ int main(int argc, char** argv) {
         }
     }
     cfp::Publish(cfp::Mode::ForceDark, {});
-    if (uMagentaFail || uHrFail || uTextShort || uEquivFail) uInfra = false;
-    std::printf("buttontext: infrastructure magenta-fail=%ld hr-fail=%ld text-short=%ld"
-                " classic-equiv-fail=%ld retries=%ld max-attempts=%ld %s\n",
-                uMagentaFail, uHrFail, uTextShort, uEquivFail, uRetries, uMaxAttempts,
-                uInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
+    ShowWindow(winU, SW_HIDE);  // never occludes the later captures of E/K/C/L
+    Pump(100);
+    if (!uInside || uMagentaFail || uHrFail || uTextShort || uEquivFail) uInfra = false;
+    std::printf("buttontext: infrastructure inside=%d magenta-fail=%ld hr-fail=%ld"
+                " text-short=%ld classic-equiv-fail=%ld retries=%ld max-attempts=%ld %s\n",
+                uInside ? 1 : 0, uMagentaFail, uHrFail, uTextShort, uEquivFail, uRetries,
+                uMaxAttempts, uInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
 
     // ------------------------------------------------------------ report
     bool infraOk = true, behaviorOk = true;
