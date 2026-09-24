@@ -65,6 +65,7 @@ constexpr int kStaticId = 101, kEditId = 102, kButtonId = 103, kCustomStaticId =
 // themed buttons even though they render through a memory DC.
 HWND g_textCausalTarget = nullptr;
 std::atomic<bool> g_textCausalBypass{false};
+std::atomic<bool> g_textCausalThemeOnly{false};
 std::atomic<long> g_textCausalCalls{0};
 std::atomic<long> g_textCausalBlack{0};
 std::atomic<COLORREF> g_textCausalIncoming{CLR_INVALID};
@@ -86,7 +87,9 @@ COLORREF TextCausalTap(HDC, COLORREF incoming, COLORREF mapped) {
     while (i < g_textInputKinds && g_textInputBins[i].color != incoming) ++i;
     if (i < g_textInputKinds) ++g_textInputBins[i].count;
     else if (g_textInputKinds < 8) g_textInputBins[g_textInputKinds++] = {incoming, 1};
-    return g_textCausalBypass.load(std::memory_order_relaxed) ? incoming : mapped;
+    const bool bypass = g_textCausalBypass.load(std::memory_order_relaxed);
+    const bool themeOnly = g_textCausalThemeOnly.load(std::memory_order_relaxed);
+    return bypass && (!themeOnly || uxo::t_drawThemeTextDepth > 0) ? incoming : mapped;
 }
 
 enum class Surface {
@@ -1815,6 +1818,80 @@ int main(int argc, char** argv) {
                 text9dSentinels ? "VALID" : "INVALID",
                 text9dInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
 
+    // ------------------------------------ Phase 9e: themed label safety
+    // Measurement only. Test the candidate DrawThemeText-scoped bypass on
+    // themed checkbox, radio and group-box labels over ColorFix's dark parent.
+    std::printf("\n[button text 9e] themed label safety\n");
+    bool text9eInfra = true;
+    DestroyWindow(uClassic);
+    DestroyWindow(uTextStatic);
+    const RECT kUVariant{10, 110, 192, 182};
+    struct Variant { const char* name; DWORD style; };
+    const Variant variants[] = {
+        {"checkbox", BS_AUTOCHECKBOX},
+        {"radio", BS_AUTORADIOBUTTON},
+        {"groupbox", BS_GROUPBOX},
+    };
+    for (int vi = 0; vi < 3; ++vi) {
+        ULONG_PTR cookie = 0;
+        HWND h = nullptr;
+        if (ActivateActCtx(v6ctx, &cookie)) {
+            h = CreateWindowExW(0, L"BUTTON", L"MM", WS_CHILD | WS_VISIBLE | variants[vi].style,
+                                kUVariant.left, kUVariant.top,
+                                kUVariant.right - kUVariant.left,
+                                kUVariant.bottom - kUVariant.top, winU,
+                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(120 + vi)),
+                                GetModuleHandleW(nullptr), nullptr);
+            DeactivateActCtx(0, cookie);
+        }
+        if (!h) { text9eInfra = false; continue; }
+        SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_textFont), FALSE);
+        Pump(50);
+        g_textCausalCalls.store(0);
+        g_textCausalInside.store(0);
+        g_textInputKinds = 0;
+        for (auto& bin : g_textInputBins) bin = {CLR_INVALID, 0};
+        g_textCausalTarget = h;
+        if (!bfo::Subclass(h)) text9eInfra = false;
+        cfh::g_probeSetTextColorTap.store(&TextCausalTap, std::memory_order_release);
+        g_textCausalThemeOnly.store(true);
+        g_textCausalBypass.store(false);
+        const WindowShot mapped = uShoot(h);
+        const long mappedCalls = g_textCausalCalls.load();
+        const long mappedInside = g_textCausalInside.load();
+        g_textCausalBypass.store(true);
+        const WindowShot bypass = uShoot(h);
+        const long bypassCalls = g_textCausalCalls.load() - mappedCalls;
+        const long bypassInside = g_textCausalInside.load() - mappedInside;
+        g_textCausalBypass.store(false);
+        g_textCausalThemeOnly.store(false);
+        cfh::g_probeSetTextColorTap.store(nullptr, std::memory_order_release);
+        g_textCausalTarget = nullptr;
+        bfo::Unsubclass(h);
+        const TextStats tm = MeasureText(mapped.mode[0], kUVariant);
+        const TextStats tb = MeasureText(bypass.mode[0], kUVariant);
+        if (!uSentinelOk(mapped) || !uSentinelOk(bypass) ||
+            mappedCalls == 0 || bypassCalls == 0 || tm.t1N < kMinTextPixels ||
+            tb.t1N < kMinTextPixels)
+            text9eInfra = false;
+        std::printf("buttontext: 9e %s calls=%ld/%ld inside=%ld/%ld mapped=",
+                    variants[vi].name, mappedCalls, bypassCalls, mappedInside, bypassInside);
+        PrintRgb(tm.bg); std::printf(":"); PrintRgb(tm.t1);
+        std::printf("x%ld cr=%.1f bypass=", tm.t1N, ContrastRatio(tm.bg, tm.t1));
+        PrintRgb(tb.bg); std::printf(":"); PrintRgb(tb.t1);
+        std::printf("x%ld cr=%.1f hist=", tb.t1N, ContrastRatio(tb.bg, tb.t1));
+        for (int i = 0; i < g_textInputKinds; ++i) {
+            if (i) std::printf(",");
+            PrintRgb(g_textInputBins[i].color);
+            std::printf("x%ld", g_textInputBins[i].count);
+        }
+        std::printf("\n");
+        DestroyWindow(h);
+        Pump(50);
+    }
+    std::printf("buttontext: 9e infrastructure %s\n",
+                text9eInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
+
     ShowWindow(winU, SW_HIDE);  // never occludes the later captures of E/K/C/L
     Pump(100);
     if (!uInside || uMagentaFail || uHrFail || uTextShort || uEquivFail) uInfra = false;
@@ -1829,6 +1906,7 @@ int main(int argc, char** argv) {
     if (!bfInfra) infraOk = false;  // 9a infrastructure
     if (!uInfra) infraOk = false;   // 9c infrastructure
     if (!text9dInfra) infraOk = false;  // 9d measurement infrastructure
+    if (!text9eInfra) infraOk = false;  // 9e measurement infrastructure
     if (!uBehavior) behaviorOk = false;  // 9c gates G1-G3
     if (!observerAutotest || !observerPassive) infraOk = false;
     if (!policyOk) behaviorOk = false;
