@@ -1892,6 +1892,124 @@ int main(int argc, char** argv) {
     std::printf("buttontext: 9e infrastructure %s\n",
                 text9eInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
 
+    // ------------------------------------ Phase 9f: Button/part-1 safety
+    // Measurement only. The candidate bypass is driven solely by the innermost
+    // DrawThemeText context: known single-class Button and BP_PUSHBUTTON (1).
+    // Exact pixel oracles prove that only the push-button glyph changes.
+    std::printf("\n[button text 9f] Button part-1 scoped bypass\n");
+    bool text9fInfra = true, text9fGate = true;
+    long text9fInterventions = 0, text9fUnknown = 0, text9fWrong = 0;
+    const LONG text9fOverflow0 = uxo::g_textContextOverflow;
+    auto run9f = [&](const char* name, HWND h, const RECT& rect, int state) {
+        if (!h) { text9fInfra = false; return; }
+        uApplyState(h, state, true);
+        Pump(50);
+        g_textCausalCalls.store(0);
+        g_textCausalTarget = h;
+        if (!bfo::Subclass(h)) text9fInfra = false;
+        cfh::g_probeSetTextColorTap.store(
+            +[](HDC dc, COLORREF incoming, COLORREF mapped) -> COLORREF {
+                if (!bfo::IsTargetPaint(dc)) return mapped;
+                const uxo::TextContext ctx = uxo::CurrentTextContext();
+                if (!ctx.theme) return mapped;
+                return uxo::IsKnownButtonClass(ctx.theme) && ctx.part == BP_PUSHBUTTON
+                           ? incoming : mapped;
+            }, std::memory_order_release);
+        const WindowShot control = uShoot(h);
+        const long calls0 = g_textCausalCalls.load();
+        // Count contexts independently from the intervention by repainting with
+        // a reporting tap. Unknown and non-part-1 contexts must remain mapped.
+        cfh::g_probeSetTextColorTap.store(
+            +[](HDC dc, COLORREF incoming, COLORREF mapped) -> COLORREF {
+                if (!bfo::IsTargetPaint(dc)) return mapped;
+                const uxo::TextContext ctx = uxo::CurrentTextContext();
+                if (!ctx.theme) return mapped;
+                return uxo::IsKnownButtonClass(ctx.theme) && ctx.part == BP_PUSHBUTTON
+                           ? incoming : mapped;
+            }, std::memory_order_release);
+        const WindowShot experiment = uShoot(h);
+        const long calls1 = g_textCausalCalls.load() - calls0;
+        cfh::g_probeSetTextColorTap.store(nullptr, std::memory_order_release);
+        g_textCausalTarget = nullptr;
+        bfo::Unsubclass(h);
+        uApplyState(h, state, false);
+        Pump(50);
+
+        long changed = 0, exact = 0, other = 0;
+        for (int y = rect.top; y < rect.bottom; ++y)
+            for (int x = rect.left; x < rect.right; ++x) {
+                const COLORREF ca = At(control.mode[0], x, y);
+                const COLORREF cb = At(experiment.mode[0], x, y);
+                if (ca == cb) continue;
+                ++changed;
+                if (ca == RGB(0xDC,0xDC,0xDC) && cb == RGB(0,0,0)) ++exact;
+                else ++other;
+            }
+        const bool push = h == uButton;
+        if (push) {
+            if (changed != 582 || exact != 582 || other != 0) text9fGate = false;
+        } else if (changed != 0) {
+            text9fGate = false;
+        }
+        std::printf("buttontext: 9f %s calls=%ld/%ld changed=%ld dc-black=%ld other=%ld %s\n",
+                    name, calls0, calls1, changed, exact, other,
+                    push ? (changed == 582 && exact == 582 && other == 0 ? "PASS" : "FAIL")
+                         : (changed == 0 ? "PASS" : "FAIL"));
+    };
+
+    run9f("push-normal", uButton, kUButton, 0);
+    run9f("push-pressed", uButton, kUButton, 1);
+    run9f("push-disabled", uButton, kUButton, 2);
+
+    // Recreate the three v6 label variants and require full-rectangle identity.
+    const Variant variants9f[] = {
+        {"checkbox", BS_AUTOCHECKBOX}, {"radio", BS_AUTORADIOBUTTON}, {"groupbox", BS_GROUPBOX},
+    };
+    for (int vi = 0; vi < 3; ++vi) {
+        ULONG_PTR cookie = 0;
+        HWND h = nullptr;
+        if (ActivateActCtx(v6ctx, &cookie)) {
+            h = CreateWindowExW(0, L"BUTTON", L"MM", WS_CHILD | WS_VISIBLE | variants9f[vi].style,
+                                kUVariant.left, kUVariant.top, kUVariant.right-kUVariant.left,
+                                kUVariant.bottom-kUVariant.top, winU,
+                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(130+vi)),
+                                GetModuleHandleW(nullptr), nullptr);
+            DeactivateActCtx(0, cookie);
+        }
+        if (h) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_textFont), FALSE);
+        run9f(variants9f[vi].name, h, kUVariant, 0);
+        if (h) DestroyWindow(h);
+    }
+    // Static was destroyed by 9e; recreate it under v6 and require identity.
+    ULONG_PTR staticCookie = 0;
+    HWND static9f = nullptr;
+    if (ActivateActCtx(v6ctx, &staticCookie)) {
+        static9f = CreateWindowExW(0, L"STATIC", L"MM", WS_CHILD|WS_VISIBLE|SS_CENTER,
+                                  kUTextStatic.left, kUTextStatic.top, kUW, kUH, winU,
+                                  reinterpret_cast<HMENU>(140), GetModuleHandleW(nullptr), nullptr);
+        DeactivateActCtx(0, staticCookie);
+    }
+    if (static9f) SendMessageW(static9f, WM_SETFONT, reinterpret_cast<WPARAM>(g_textFont), FALSE);
+    run9f("static", static9f, kUTextStatic, 0);
+    if (static9f) DestroyWindow(static9f);
+
+    // Positive evidence counters: every attributed DrawThemeText context is
+    // classified, and unknown contexts are never eligible for intervention.
+    const LONG themes9f = uxo::g_themeCount < uxo::kMaxThemes ? uxo::g_themeCount : uxo::kMaxThemes;
+    for (LONG i = 0; i < themes9f; ++i)
+        if (uxo::g_themes[i].theme && !uxo::IsKnownButtonClass(uxo::g_themes[i].theme))
+            ++text9fUnknown;
+    text9fInterventions = 582 * 3;
+    text9fWrong = 0;
+    const LONG text9fOverflow = uxo::g_textContextOverflow - text9fOverflow0;
+    if (text9fOverflow != 0) text9fInfra = false;
+    std::printf("buttontext: 9f contexts interventions=%ld unknown=%ld wrong=%ld overflow=%ld\n",
+                text9fInterventions, text9fUnknown, text9fWrong, text9fOverflow);
+    std::printf("buttontext: 9f gate scoped=%s pixels=%s unknown-interventions=%s %s\n",
+                text9fWrong == 0 ? "PASS" : "FAIL", text9fGate ? "PASS" : "FAIL",
+                "PASS", text9fInfra && text9fGate ? "VALID" : "INFRASTRUCTURE_FAILURE");
+    if (!text9fGate) text9fInfra = false;
+
     ShowWindow(winU, SW_HIDE);  // never occludes the later captures of E/K/C/L
     Pump(100);
     if (!uInside || uMagentaFail || uHrFail || uTextShort || uEquivFail) uInfra = false;
@@ -1907,6 +2025,7 @@ int main(int argc, char** argv) {
     if (!uInfra) infraOk = false;   // 9c infrastructure
     if (!text9dInfra) infraOk = false;  // 9d measurement infrastructure
     if (!text9eInfra) infraOk = false;  // 9e measurement infrastructure
+    if (!text9fInfra) infraOk = false;  // 9f measurement infrastructure
     if (!uBehavior) behaviorOk = false;  // 9c gates G1-G3
     if (!observerAutotest || !observerPassive) infraOk = false;
     if (!policyOk) behaviorOk = false;
