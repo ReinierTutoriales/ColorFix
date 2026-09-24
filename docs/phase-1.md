@@ -22,8 +22,8 @@ Validate semantic system-color interception before UxTheme or modern rendering A
 - The UxTheme extension is fail-closed: ColorFix does not load uxtheme.dll for
   it, resolves the complete six-export surface before registration, and only
   enables its HTHEME classification/context state after all six hooks register.
-- UxTheme tracking is used only to suppress literal black-to-light mapping for
-  known single-class Button part 1 text. Unknown/ambiguous handles keep normal
+- UxTheme tracking is used only to skip literal text-color mapping for known
+  single-class Button part 1 text. Unknown/ambiguous handles keep normal
   mapping. GDI+, DirectWrite, and Direct2D remain outside Phase 1.
 
 ## Test matrix
