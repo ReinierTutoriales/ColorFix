@@ -38,7 +38,7 @@ struct ThemeMap {
 };
 
 inline constexpr int kMaxThemes = 64;
-inline constexpr int kMaxEvents = 512;
+inline constexpr int kMaxEvents = 2048;
 inline ThemeMap g_themes[kMaxThemes]{};
 inline Event g_events[kMaxEvents]{};
 inline volatile LONG g_themeCount = 0;
@@ -54,7 +54,7 @@ inline HWND g_l = nullptr;
 
 // Increment 9a. While paused, the observer keeps the HTHEME -> class map but
 // neither counts nor records events, so the historical report and the
-// 512-event buffer are untouched. g_drawIntercept (null by default: fully
+// fixed event buffer are untouched. g_drawIntercept (null by default: fully
 // passive) lets the causal experiment replace one DrawThemeBackground call.
 inline volatile LONG g_paused = 0;
 using DrawIntercept_t = bool (*)(const wchar_t* klass, HDC dc, int part, int state,
