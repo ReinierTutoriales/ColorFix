@@ -19,7 +19,8 @@ In scope:
 - attribution of text color paths through `SetTextColor`, `GetSysColor`, and
   UxTheme text/background drawing;
 - explicit contrast reporting for the measured surfaces;
-- minimal Windhawk startup logging for core hook and UxTheme hook status.
+- minimal Windhawk startup logging for core hook registration and UxTheme hook
+  registration status.
 
 Out of scope:
 
@@ -147,10 +148,20 @@ text-safety S.status bg=F0F0F0 text=E8E8E8 contrast=1.1 calls lit=0 sem=4 theme=
 
 ## Product logging for 11b
 
-The Windhawk template logs only startup status after `RegisterPhase1Hooks`:
+The Windhawk template logs only startup registration status after
+`RegisterPhase1Hooks` returns:
 
 - `ColorFix: phase1 core hooks ON` or `FAILED`;
 - `ColorFix: uxtheme hooks ON` or `OFF`.
+
+These messages mean the hooks were queued/registered during `Wh_ModInit`. They
+do not prove that Windhawk has already applied the detours at that exact point;
+Windhawk applies hooks queued during initialization after `Wh_ModInit` returns.
+
+The logging format strings must remain literals. Windhawk implements `Wh_Log` as
+a macro, and the syntax-check stub mirrors that literal-concatenating shape so a
+ternary/non-literal format expression fails in CI rather than only inside
+Windhawk.
 
 This logging remains in `windhawk/colorfix.wh.template.cpp`. It must not move
 into `hooks/`, because the shared hook code must not depend on Windhawk APIs.
