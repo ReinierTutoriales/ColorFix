@@ -356,6 +356,44 @@ Evidence established by the current probes:
     captures and needed no retries in all twelve processes of runs 227 and
     228. This is a correlation, not a proven cause; a bounded sentinel retry
     remains as a detector.
+- Themed button text causality (probe increment 9d, runs 235 push and 238 pull
+  request, both load orders, x64/x86/ARM64; measurement only):
+  - Run 235 intervened only at the product `SetTextColor` mapping while the
+    U themed push button painted under policy ON. The mapped control was
+    `FDFDFD` with `DCDCDC` text (582 pixels, contrast 1.3); bypassing that
+    mapping changed only the text to `000000` (582 pixels, contrast 20.6);
+    restoring the mapping returned exactly to the mapped capture. This proves
+    that the product `SetTextColor` hook causes the increment-9c themed
+    push-button text regression.
+  - Run 238 measured 36 attributed `SetTextColor` calls across the three
+    button captures: input histogram `000000` x24 and `DCDCDC` x12, or
+    eight black plus four `DCDCDC` calls per capture. All 24 black calls
+    occurred while the thread was inside `DrawThemeText`; none of the 12
+    `DCDCDC` calls did. `DrawThemeTextEx` was not observed for this path.
+    The source of the four `DCDCDC` inputs per capture is not measured.
+    A possible source is an already-mapped `GetSysColor(COLOR_BTNTEXT)`,
+    but that remains an inference.
+  - A text-bearing themed v6 Static was added as a safety control. Its
+    `SetTextColor` calls were outside `DrawThemeText`
+    (`inside-theme-text=0`), and the DrawThemeText-scoped bypass did not
+    change its visible result: `2D2D2D` background, `DCDCDC` text,
+    582 pixels, contrast 10.0. This establishes only that the measured Static
+    does not depend on the candidate DrawThemeText rule. Its visible text
+    color is not proven to originate from the hooked `SetTextColor`; a
+    direct `SetTextColor_Original` call from ctlcolor adjustment is a
+    plausible but unmeasured explanation.
+  - A process-wide rule that bypasses literal mapping inside
+    `DrawThemeText*` is therefore not yet a product contract. Checkbox,
+    radio-button and group-box labels can plausibly use themed text over a
+    parent background that ColorFix has already darkened; passing native black
+    through there could create the inverse contrast failure. Increment 9d did
+    not contain those controls, so this is a prediction, not a measurement.
+    Before changing product behavior, measure those variants and compare the
+    DrawThemeText-scoped bypass with push-button-only theme opt-out. The latter
+    is already measured to produce a `2D2D2D` push-button face with
+    `DCDCDC` text (contrast 10.0), but restoration can conflict with an
+    application's own `SetWindowTheme` choice and must be treated as a
+    separate compatibility cost.
 
 These results were reproduced by CI on x64, x86, and native ARM64. Increment 3 was squash-merged to `main` as `5cd97a1`; main CI run 48 was reported green on all three architectures.
 
@@ -366,6 +404,11 @@ emitted, so no annotation was truncated. Increment 9b was squash-merged to
 
 Increment 9c evidence: runs 227 (push) and 228 (pull request), `exit=0` in
 all six processes of each, with the increment 9b gates unchanged.
+
+Increment 9d evidence: run 235 (push) established the causal SetTextColor
+intervention; run 238 (pull request on `9e5f505`) completed the call-context
+and Static-control characterization. All six processes in run 238 ended with
+`exit=0`, with the increment 9b and 9c gates unchanged.
 
 ## 10. Requirements for future rendering mechanisms
 
