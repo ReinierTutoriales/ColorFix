@@ -65,6 +65,13 @@ cache colors too. On an effective-state change:
 Some applications may not refresh all cached state and can require a restart.
 That is a product limitation to document rather than hide.
 
+ColorFix's own identity cache of the original system color brush handles
+(increment 9b, used by the `FillRect` hook) is not refreshed on policy
+changes. It stores handles only; whether a role is remapped is decided at the
+call by the same predicate as `GetSysColorBrush`. That the handles are stable
+is measured across real policy signals (section 9), not across `SetSysColors`;
+if that premise breaks, the cache refresh must be wired with evidence.
+
 ## 6. Disabled processes and candidate injection models
 
 The standalone injection model is **not decided yet**. SetWindowsHookEx is a
@@ -178,9 +185,9 @@ Evidence established by the current probes:
 - Default USER32 Static and Edit backgrounds are covered through
   `WM_CTLCOLOR*` adjustment.
 - An application-chosen Static color is preserved.
-- The classic USER32 push-button face remains a visual MISS even though the
-  `WM_CTLCOLORBTN` semantic autotest passes. Its face is therefore a separate
-  rendering path.
+- The classic USER32 push-button face remained a visual MISS through
+  increment 9a even though the `WM_CTLCOLORBTN` semantic autotest passes. Its
+  face is a separate rendering path, covered since increment 9b (below).
 - The scrollbar observation is informational only; no stronger conclusion is
   established yet.
 - Common Controls v6 (comctl32 6.16, probe increment 5, both load orders):
@@ -266,9 +273,56 @@ Evidence established by the current probes:
     modes). Face colors: NORMAL/DEFAULTED `FDFDFD`, PRESSED `CCE4F7`,
     DISABLED `F9F9F9`. `FillRect` is called but is not causal; all draws use
     a memory DC (`WindowFromDC` 0).
-  - Not yet measured: which brush handle the classic face `FillRect` receives.
+- Classic button face: brush identity and product hook (probe increment 9b,
+  runs 213 and 215, both load orders, x64/x86/ARM64):
+  - Measured before any substitution: every `FillRect` call in the classic
+    face paint receives exactly the original `GetSysColorBrush(COLOR_BTNFACE)`
+    handle (index 15, `F0F0F0`), one identity only, in C (96 calls) and
+    T opted out (80 calls), four states each, no samples dropped. No
+    `COLOR_x + 1` value and no other brush was seen there.
+  - Product rule (tested contract): the `FillRect` hook replaces a brush only
+    when it is identical to an original system color brush handle whose role
+    the mapper remaps, and only while the policy is active; the replacement is
+    the same semantic brush `GetSysColorBrush` returns. Recognition is by
+    handle identity, never by color: an application brush of the same color
+    (`F0F0F0`), an unmapped role (`COLOR_HIGHLIGHT`), a stock brush and a
+    ColorFix semantic brush all pass through; policy OFF and the High
+    Contrast veto pass through.
+  - `COLOR_x + 1` values and a NULL brush pass through untouched: the hooked
+    result equals the unhooked call on a fresh DC with the same input. A NULL
+    brush paints the DC's current brush (`FFFFFF` on a new memory DC), not
+    nothing; run 214 failed on a wrong prediction of that native behavior,
+    which is why the oracle is differential.
+  - Visual result: the classic C face goes from `F0F0F0` to `2D2D2D` COVERED
+    in both capture modes, and the opted-out T face from `F0F0F0` to `2D2D2D`
+    COVERED; theme restoration still returns T exactly to its themed capture.
+    Every policy step (OFF, ON, HC veto, FollowSystem light/dark) matched
+    24/24 surfaces and the real-signal runtime steps passed, so the hook
+    follows the effective state in both directions.
+  - No regression: every surface previously COVERED, PRESERVED or VALID kept
+    its verdict. The themed v6 button (window V) keeps `FDFDFD`/`CCE4F7`/
+    `F9F9F9` and remains a MISS outside the scope of this increment
+    (`DrawThemeBackground`); the passive-pixel invariant held.
+  - The 9a characterization is unchanged in meaning with the product hook
+    live: `FillRect` stays causal (marker) for C and T opted out, and
+    `DrawFrameControl` suppression still removes the T face. Only the control
+    face color changed (`2D2D2D`), by design.
+  - Identity cache: 31 handles, 31 distinct, equal to the unhooked originals,
+    identical after a rebuild and after the real-signal runtime phase
+    (`AppsUseLightTheme` plus `ImmersiveColorSet` broadcast). Not measured:
+    stability across `SetSysColors`, which that phase does not exercise.
+  - Probe scenes (outside the autotests): 211 product substitutions and zero
+    `COLOR_x + 1` values reached `FillRect`. This describes the probe windows
+    only; real applications are not yet measured.
+  - Probe architecture: the product owns `user32!FillRect`; the button-face
+    observer is a probe-only tap inside the product hook (compiled out of the
+    mod), so no target has two detours.
 
 These results were reproduced by CI on x64, x86, and native ARM64. Increment 3 was squash-merged to `main` as `5cd97a1`; main CI run 48 was reported green on all three architectures.
+
+Increment 9b evidence: runs 213 (measurement) and 215 (product hook, all
+gates PASS, `exit=0` in all six processes). No notice-length warning was
+emitted, so no annotation was truncated.
 
 ## 10. Requirements for future rendering mechanisms
 
