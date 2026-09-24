@@ -87,6 +87,7 @@ struct ThemeMapEntry {
 inline constexpr int kThemeMapCapacity = 64;
 inline ThemeMapEntry g_themeMap[kThemeMapCapacity];
 inline std::atomic_flag g_themeMapLock = ATOMIC_FLAG_INIT;
+inline std::atomic<int> g_uxthemeHooks{0};  // 0 unavailable/off, 1 complete
 
 struct ThemeMapGuard {
     ThemeMapGuard() { while (g_themeMapLock.test_and_set(std::memory_order_acquire)) YieldProcessor(); }
@@ -480,14 +481,24 @@ inline bool RegisterPhase1Hooks(RegisterHook&& registerHook) {
     ok &= registerHook(user32, "DefWindowProcA",   reinterpret_cast<void*>(DefWindowProcA_Hook),   reinterpret_cast<void**>(&DefWindowProcA_Original));
     ok &= registerHook(user32, "FillRect",         reinterpret_cast<void*>(FillRect_Hook),         reinterpret_cast<void**>(&FillRect_Original));
     if (uxtheme) {
-        bool uxOk = true;
-        uxOk &= registerHook(uxtheme, "OpenThemeData", reinterpret_cast<void*>(OpenThemeData_Hook), reinterpret_cast<void**>(&OpenThemeData_Original));
-        uxOk &= registerHook(uxtheme, "OpenThemeDataForDpi", reinterpret_cast<void*>(OpenThemeDataForDpi_Hook), reinterpret_cast<void**>(&OpenThemeDataForDpi_Original));
-        uxOk &= registerHook(uxtheme, "OpenThemeDataEx", reinterpret_cast<void*>(OpenThemeDataEx_Hook), reinterpret_cast<void**>(&OpenThemeDataEx_Original));
-        uxOk &= registerHook(uxtheme, "CloseThemeData", reinterpret_cast<void*>(CloseThemeData_Hook), reinterpret_cast<void**>(&CloseThemeData_Original));
-        uxOk &= registerHook(uxtheme, "DrawThemeText", reinterpret_cast<void*>(DrawThemeText_Hook), reinterpret_cast<void**>(&DrawThemeText_Original));
-        uxOk &= registerHook(uxtheme, "DrawThemeTextEx", reinterpret_cast<void*>(DrawThemeTextEx_Hook), reinterpret_cast<void**>(&DrawThemeTextEx_Original));
-        (void)uxOk;  // UxTheme enhancement is fail-closed and independent of Phase 1.
+        const char* names[] = {"OpenThemeData", "OpenThemeDataForDpi", "OpenThemeDataEx",
+                               "CloseThemeData", "DrawThemeText", "DrawThemeTextEx"};
+        void* targets[_countof(names)]{};
+        bool complete = true;
+        for (size_t i = 0; i < _countof(names); ++i) {
+            targets[i] = reinterpret_cast<void*>(GetProcAddress(uxtheme, names[i]));
+            complete &= targets[i] != nullptr;
+        }
+        if (complete) {
+            bool uxOk = true;
+            uxOk &= registerHook(uxtheme, names[0], reinterpret_cast<void*>(OpenThemeData_Hook), reinterpret_cast<void**>(&OpenThemeData_Original));
+            uxOk &= registerHook(uxtheme, names[1], reinterpret_cast<void*>(OpenThemeDataForDpi_Hook), reinterpret_cast<void**>(&OpenThemeDataForDpi_Original));
+            uxOk &= registerHook(uxtheme, names[2], reinterpret_cast<void*>(OpenThemeDataEx_Hook), reinterpret_cast<void**>(&OpenThemeDataEx_Original));
+            uxOk &= registerHook(uxtheme, names[3], reinterpret_cast<void*>(CloseThemeData_Hook), reinterpret_cast<void**>(&CloseThemeData_Original));
+            uxOk &= registerHook(uxtheme, names[4], reinterpret_cast<void*>(DrawThemeText_Hook), reinterpret_cast<void**>(&DrawThemeText_Original));
+            uxOk &= registerHook(uxtheme, names[5], reinterpret_cast<void*>(DrawThemeTextEx_Hook), reinterpret_cast<void**>(&DrawThemeTextEx_Original));
+            g_uxthemeHooks.store(uxOk ? 1 : 0, std::memory_order_release);
+        }
     }
     return ok;
 }
