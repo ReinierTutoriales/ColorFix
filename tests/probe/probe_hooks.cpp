@@ -1910,7 +1910,8 @@ int main(int argc, char** argv) {
     if (!themeProductAutotest) infraOk = false;
     if (!productTextGate || !productStaticGate || !productVariantGate) behaviorOk = false;
     if (!uBehavior) behaviorOk = false;  // 9c gates G1-G3
-    if (!observerAutotest || !observerPassive) infraOk = false;
+    const bool observerFinal = uxo::Autotest();
+    if (!observerAutotest || !observerFinal || !observerPassive) infraOk = false;
     if (!policyOk) behaviorOk = false;
 
     std::printf("\n[autotest]\n");
