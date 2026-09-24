@@ -43,6 +43,12 @@ inline std::atomic<long> g_probeCalls[static_cast<int>(HookId::Count)];
 #endif
 
 #if defined(COLORFIX_PROBE)
+using ThemeOpenTap_t = void (*)(HTHEME, LPCWSTR);
+using ThemeCloseTap_t = void (*)(HTHEME, HRESULT);
+using ThemeTextTap_t = void (*)(HTHEME, int, bool);
+inline std::atomic<ThemeOpenTap_t> g_probeThemeOpenTap{nullptr};
+inline std::atomic<ThemeCloseTap_t> g_probeThemeCloseTap{nullptr};
+inline std::atomic<ThemeTextTap_t> g_probeThemeTextTap{nullptr};
 // Probe-only FillRect telemetry and tap. The tap sees the caller's brush
 // before the product decision and returns the brush to continue with; the
 // 9a/9b button-face observer uses it instead of a second MinHook detour on
@@ -99,25 +105,26 @@ inline bool IsButtonThemeClass(LPCWSTR klass) {
     return single && _wcsicmp(single, L"Button") == 0;
 }
 
-inline void RememberTheme(HTHEME theme, LPCWSTR klass) {
-    if (!theme || !IsButtonThemeClass(klass)) return;
+inline bool RememberTheme(HTHEME theme, LPCWSTR klass) {
+    if (!theme || !IsButtonThemeClass(klass)) return false;
     ThemeMapGuard guard;
     ThemeMapEntry* empty = nullptr;
     for (auto& entry : g_themeMap) {
         if (entry.theme.load(std::memory_order_relaxed) == theme) {
             entry.refs.fetch_add(1, std::memory_order_relaxed);
-            return;
+            return true;
         }
         if (!empty && !entry.theme.load(std::memory_order_relaxed)) empty = &entry;
     }
-    if (!empty) return;
+    if (!empty) return false;
     lstrcpynW(empty->klass, L"Button", static_cast<int>(_countof(empty->klass)));
     empty->refs.store(1, std::memory_order_relaxed);
     empty->theme.store(theme, std::memory_order_release);
+    return true;
 }
 
-inline void ReleaseTheme(HTHEME theme) {
-    if (!theme) return;
+inline bool ReleaseTheme(HTHEME theme) {
+    if (!theme) return false;
     ThemeMapGuard guard;
     for (auto& entry : g_themeMap) {
         if (entry.theme.load(std::memory_order_relaxed) != theme) continue;
@@ -125,7 +132,7 @@ inline void ReleaseTheme(HTHEME theme) {
         if (refs <= 0) {
             entry.theme.store(nullptr, std::memory_order_release);
             entry.klass[0] = L'\0';
-            return;
+            return false;
         }
         if (refs == 1) {
             entry.refs.store(0, std::memory_order_relaxed);
@@ -134,8 +141,9 @@ inline void ReleaseTheme(HTHEME theme) {
         } else {
             entry.refs.store(refs - 1, std::memory_order_relaxed);
         }
-        return;
+        return true;
     }
+    return false;
 }
 
 inline bool KnownButtonTheme(HTHEME theme) {
@@ -175,33 +183,53 @@ struct ThemeTextScope {
 inline HTHEME WINAPI OpenThemeData_Hook(HWND hwnd, LPCWSTR klass) {
     HTHEME theme = OpenThemeData_Original(hwnd, klass);
     RememberTheme(theme, klass);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeOpenTap.load(std::memory_order_acquire)) tap(theme, klass);
+#endif
     return theme;
 }
 inline HTHEME WINAPI OpenThemeDataForDpi_Hook(HWND hwnd, LPCWSTR klass, UINT dpi) {
     HTHEME theme = OpenThemeDataForDpi_Original(hwnd, klass, dpi);
     RememberTheme(theme, klass);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeOpenTap.load(std::memory_order_acquire)) tap(theme, klass);
+#endif
     return theme;
 }
 inline HTHEME WINAPI OpenThemeDataEx_Hook(HWND hwnd, LPCWSTR klass, DWORD flags) {
     HTHEME theme = OpenThemeDataEx_Original(hwnd, klass, flags);
     RememberTheme(theme, klass);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeOpenTap.load(std::memory_order_acquire)) tap(theme, klass);
+#endif
     return theme;
 }
 inline HRESULT WINAPI CloseThemeData_Hook(HTHEME theme) {
     const HRESULT hr = CloseThemeData_Original(theme);
     if (SUCCEEDED(hr)) ReleaseTheme(theme);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeCloseTap.load(std::memory_order_acquire)) tap(theme, hr);
+#endif
     return hr;
 }
 inline HRESULT WINAPI DrawThemeText_Hook(HTHEME theme, HDC dc, int part, int state,
                                          LPCWSTR text, int count, DWORD flags,
                                          DWORD flags2, const RECT* rc) {
     ThemeTextScope scope(theme, part);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeTextTap.load(std::memory_order_acquire))
+        tap(theme, part, KnownButtonTheme(theme));
+#endif
     return DrawThemeText_Original(theme, dc, part, state, text, count, flags, flags2, rc);
 }
 inline HRESULT WINAPI DrawThemeTextEx_Hook(HTHEME theme, HDC dc, int part, int state,
                                            LPCWSTR text, int count, DWORD flags,
                                            RECT* rc, const DTTOPTS* opts) {
     ThemeTextScope scope(theme, part);
+#if defined(COLORFIX_PROBE)
+    if (const auto tap = g_probeThemeTextTap.load(std::memory_order_acquire))
+        tap(theme, part, KnownButtonTheme(theme));
+#endif
     return DrawThemeTextEx_Original(theme, dc, part, state, text, count, flags, rc, opts);
 }
 
@@ -435,8 +463,7 @@ inline bool RegisterPhase1Hooks(RegisterHook&& registerHook) {
     HMODULE user32 = GetModuleHandleW(L"user32.dll");
     HMODULE gdi32  = GetModuleHandleW(L"gdi32.dll");
     HMODULE uxtheme = GetModuleHandleW(L"uxtheme.dll");
-    if (!uxtheme) uxtheme = LoadLibraryW(L"uxtheme.dll");
-    if (!user32 || !gdi32 || !uxtheme) return false;
+    if (!user32 || !gdi32) return false;
 
     // Identity cache from the exports before any hook is queued or applied.
     if (FillSystemBrushCache(&::GetSysColorBrush) == 0) return false;
@@ -452,12 +479,16 @@ inline bool RegisterPhase1Hooks(RegisterHook&& registerHook) {
     ok &= registerHook(user32, "DefWindowProcW",   reinterpret_cast<void*>(DefWindowProcW_Hook),   reinterpret_cast<void**>(&DefWindowProcW_Original));
     ok &= registerHook(user32, "DefWindowProcA",   reinterpret_cast<void*>(DefWindowProcA_Hook),   reinterpret_cast<void**>(&DefWindowProcA_Original));
     ok &= registerHook(user32, "FillRect",         reinterpret_cast<void*>(FillRect_Hook),         reinterpret_cast<void**>(&FillRect_Original));
-    ok &= registerHook(uxtheme, "OpenThemeData", reinterpret_cast<void*>(OpenThemeData_Hook), reinterpret_cast<void**>(&OpenThemeData_Original));
-    ok &= registerHook(uxtheme, "OpenThemeDataForDpi", reinterpret_cast<void*>(OpenThemeDataForDpi_Hook), reinterpret_cast<void**>(&OpenThemeDataForDpi_Original));
-    ok &= registerHook(uxtheme, "OpenThemeDataEx", reinterpret_cast<void*>(OpenThemeDataEx_Hook), reinterpret_cast<void**>(&OpenThemeDataEx_Original));
-    ok &= registerHook(uxtheme, "CloseThemeData", reinterpret_cast<void*>(CloseThemeData_Hook), reinterpret_cast<void**>(&CloseThemeData_Original));
-    ok &= registerHook(uxtheme, "DrawThemeText", reinterpret_cast<void*>(DrawThemeText_Hook), reinterpret_cast<void**>(&DrawThemeText_Original));
-    ok &= registerHook(uxtheme, "DrawThemeTextEx", reinterpret_cast<void*>(DrawThemeTextEx_Hook), reinterpret_cast<void**>(&DrawThemeTextEx_Original));
+    if (uxtheme) {
+        bool uxOk = true;
+        uxOk &= registerHook(uxtheme, "OpenThemeData", reinterpret_cast<void*>(OpenThemeData_Hook), reinterpret_cast<void**>(&OpenThemeData_Original));
+        uxOk &= registerHook(uxtheme, "OpenThemeDataForDpi", reinterpret_cast<void*>(OpenThemeDataForDpi_Hook), reinterpret_cast<void**>(&OpenThemeDataForDpi_Original));
+        uxOk &= registerHook(uxtheme, "OpenThemeDataEx", reinterpret_cast<void*>(OpenThemeDataEx_Hook), reinterpret_cast<void**>(&OpenThemeDataEx_Original));
+        uxOk &= registerHook(uxtheme, "CloseThemeData", reinterpret_cast<void*>(CloseThemeData_Hook), reinterpret_cast<void**>(&CloseThemeData_Original));
+        uxOk &= registerHook(uxtheme, "DrawThemeText", reinterpret_cast<void*>(DrawThemeText_Hook), reinterpret_cast<void**>(&DrawThemeText_Original));
+        uxOk &= registerHook(uxtheme, "DrawThemeTextEx", reinterpret_cast<void*>(DrawThemeTextEx_Hook), reinterpret_cast<void**>(&DrawThemeTextEx_Original));
+        (void)uxOk;  // UxTheme enhancement is fail-closed and independent of Phase 1.
+    }
     return ok;
 }
 
