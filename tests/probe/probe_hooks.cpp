@@ -1844,6 +1844,55 @@ int main(int argc, char** argv) {
                 text9dSentinels ? "VALID" : "INVALID",
                 text9dInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
 
+    const bool productStaticGate =
+        text9dSM.bg == RGB(0x2D,0x2D,0x2D) && text9dSM.t1 == RGB(0xDC,0xDC,0xDC) &&
+        text9dSB.bg == text9dSM.bg && text9dSB.t1 == text9dSM.t1;
+    std::printf("buttontext: product static=2D2D2D:DCDCDC %s\n",
+                productStaticGate ? "PASS" : "HOOK_BEHAVIOR_FAILURE");
+
+    // Product regression gate for other Button parts. These controls share the
+    // Button HTHEME with the push button, so class-only scoping would fail.
+    bool productVariantGate = true;
+    DestroyWindow(uClassic);
+    DestroyWindow(uTextStatic);
+    const RECT kUVariant{10, 110, 192, 182};
+    struct ProductVariant { const char* name; DWORD style; long expectedText; };
+    const ProductVariant productVariants[] = {
+        {"checkbox", BS_AUTOCHECKBOX, 582},
+        {"radio", BS_AUTORADIOBUTTON, 582},
+        {"groupbox", BS_GROUPBOX, 694},
+    };
+    for (int vi = 0; vi < 3; ++vi) {
+        ULONG_PTR cookie = 0;
+        HWND h = nullptr;
+        if (ActivateActCtx(v6ctx, &cookie)) {
+            h = CreateWindowExW(0, L"BUTTON", L"MM",
+                                WS_CHILD | WS_VISIBLE | productVariants[vi].style,
+                                kUVariant.left, kUVariant.top,
+                                kUVariant.right - kUVariant.left,
+                                kUVariant.bottom - kUVariant.top, winU,
+                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(120 + vi)),
+                                GetModuleHandleW(nullptr), nullptr);
+            DeactivateActCtx(0, cookie);
+        }
+        if (!h) { productVariantGate = false; continue; }
+        SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_textFont), FALSE);
+        Pump(50);
+        const WindowShot shot = uShoot(h);
+        const TextStats t = MeasureText(shot.mode[0], kUVariant);
+        const TextStats tf = MeasureText(shot.mode[1], kUVariant);
+        const bool pass = uSentinelOk(shot) &&
+                          t.bg == RGB(0x20,0x20,0x20) && t.t1 == RGB(0xDC,0xDC,0xDC) &&
+                          t.t1N == productVariants[vi].expectedText &&
+                          tf.bg == t.bg && tf.t1 == t.t1 && tf.t1N == t.t1N;
+        productVariantGate &= pass;
+        std::printf("buttontext: product %s=", productVariants[vi].name);
+        PrintRgb(t.bg); std::printf(":"); PrintRgb(t.t1);
+        std::printf("x%ld %s\n", t.t1N, pass ? "PASS" : "HOOK_BEHAVIOR_FAILURE");
+        DestroyWindow(h);
+        Pump(50);
+    }
+
     ShowWindow(winU, SW_HIDE);  // never occludes the later captures of E/K/C/L
     Pump(100);
     if (!uInside || uMagentaFail || uHrFail || uTextShort || uEquivFail) uInfra = false;
@@ -1859,7 +1908,7 @@ int main(int argc, char** argv) {
     if (!uInfra) infraOk = false;   // 9c infrastructure
     if (!text9dInfra) infraOk = false;  // 9d measurement infrastructure
     if (!themeProductAutotest) infraOk = false;
-    if (!productTextGate) behaviorOk = false;
+    if (!productTextGate || !productStaticGate || !productVariantGate) behaviorOk = false;
     if (!uBehavior) behaviorOk = false;  // 9c gates G1-G3
     if (!observerAutotest || !observerPassive) infraOk = false;
     if (!policyOk) behaviorOk = false;
