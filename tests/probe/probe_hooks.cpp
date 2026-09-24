@@ -1909,10 +1909,10 @@ int main(int argc, char** argv) {
         if (!bfo::Subclass(h)) text9fInfra = false;
         cfh::g_probeSetTextColorTap.store(
             +[](HDC dc, COLORREF incoming, COLORREF mapped) -> COLORREF {
-                if (!bfo::IsTargetPaint(dc)) return mapped;
+                if (bfo::t_painting != g_textCausalTarget || !dc) return mapped;
                 const uxo::TextContext ctx = uxo::CurrentTextContext();
                 if (!ctx.theme) return mapped;
-                return uxo::IsKnownButtonClass(ctx.theme) && ctx.part == BP_PUSHBUTTON
+                return uxo::IsKnownButtonClass(ctx.theme) && ctx.part == 1
                            ? incoming : mapped;
             }, std::memory_order_release);
         const WindowShot control = uShoot(h);
@@ -1921,10 +1921,10 @@ int main(int argc, char** argv) {
         // a reporting tap. Unknown and non-part-1 contexts must remain mapped.
         cfh::g_probeSetTextColorTap.store(
             +[](HDC dc, COLORREF incoming, COLORREF mapped) -> COLORREF {
-                if (!bfo::IsTargetPaint(dc)) return mapped;
+                if (bfo::t_painting != g_textCausalTarget || !dc) return mapped;
                 const uxo::TextContext ctx = uxo::CurrentTextContext();
                 if (!ctx.theme) return mapped;
-                return uxo::IsKnownButtonClass(ctx.theme) && ctx.part == BP_PUSHBUTTON
+                return uxo::IsKnownButtonClass(ctx.theme) && ctx.part == 1
                            ? incoming : mapped;
             }, std::memory_order_release);
         const WindowShot experiment = uShoot(h);
