@@ -69,6 +69,7 @@ inline thread_local TextContext t_textContext[kTextContextMax]{};
 inline thread_local int t_drawThemeTextDepth = 0;
 inline volatile LONG g_text = 0;
 inline volatile LONG g_textEx = 0;
+inline volatile LONG g_textContextOverflow = 0;
 
 using OpenThemeData_t = HTHEME (WINAPI*)(HWND, LPCWSTR);
 using OpenThemeDataForDpi_t = HTHEME (WINAPI*)(HWND, LPCWSTR, UINT);
@@ -274,6 +275,7 @@ inline HRESULT WINAPI GetThemeColor_Hook(HTHEME theme, int part, int state, int 
 inline HRESULT WINAPI DrawThemeText_Hook(HTHEME theme, HDC dc, int part, int state, LPCWSTR text, int count, DWORD flags, DWORD flags2, const RECT* rect) {
     const int depth = t_drawThemeTextDepth++;
     if (depth < kTextContextMax) t_textContext[depth] = {theme, part};
+    else InterlockedIncrement(&g_textContextOverflow);
     const HRESULT hr = g_textOrig(theme, dc, part, state, text, count, flags, flags2, rect);
     --t_drawThemeTextDepth;
     InterlockedIncrement(&g_text);
@@ -283,6 +285,7 @@ inline HRESULT WINAPI DrawThemeText_Hook(HTHEME theme, HDC dc, int part, int sta
 inline HRESULT WINAPI DrawThemeTextEx_Hook(HTHEME theme, HDC dc, int part, int state, LPCWSTR text, int count, DWORD flags, LPRECT rect, const DTTOPTS* opts) {
     const int depth = t_drawThemeTextDepth++;
     if (depth < kTextContextMax) t_textContext[depth] = {theme, part};
+    else InterlockedIncrement(&g_textContextOverflow);
     const HRESULT hr = g_textExOrig(theme, dc, part, state, text, count, flags, rect, opts);
     --t_drawThemeTextDepth;
     InterlockedIncrement(&g_textEx);
