@@ -2,6 +2,7 @@
 #include <commctrl.h>
 #include "colorfix_mapper.hpp"
 #include "colorfix_policy.hpp"
+#include "colorfix_hooks.hpp"
 
 using namespace colorfix;
 
@@ -39,3 +40,11 @@ static_assert(!EffectiveDark(Mode::ForceDark,    Signals{true, false}));
 static_assert(!EffectiveDark(Mode::ForceDark,    Signals{true, true}));
 static_assert(!EffectiveDark(Mode::FollowSystem, Signals{true, false}));
 static_assert(!EffectiveDark(Mode::FollowSystem, Signals{true, true}));
+
+// Candidate (c) classifier decision table: only a single Button class,
+// optionally with one X:: prefix, is eligible. Multi-class and ambiguous
+// names remain fail-closed.
+static_assert(colorfix::hooks::SingleThemeClass(L"Button") != nullptr);
+static_assert(colorfix::hooks::SingleThemeClass(L"Explorer::Button") != nullptr);
+static_assert(colorfix::hooks::SingleThemeClass(L"Button;Edit") == nullptr);
+static_assert(colorfix::hooks::SingleThemeClass(nullptr) == nullptr);
