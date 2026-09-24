@@ -81,7 +81,7 @@ COLORREF TextCausalTap(HDC, COLORREF incoming, COLORREF mapped) {
     if (incoming == RGB(0, 0, 0)) g_textCausalBlack.fetch_add(1, std::memory_order_relaxed);
     g_textCausalIncoming.store(incoming, std::memory_order_relaxed);
     g_textCausalMapped.store(mapped, std::memory_order_relaxed);
-    if (uxo::t_drawThemeTextDepth > 0) g_textCausalInside.fetch_add(1, std::memory_order_relaxed);
+    if (cfh::CurrentThemeText().theme) g_textCausalInside.fetch_add(1, std::memory_order_relaxed);
     int i = 0;
     while (i < g_textInputKinds && g_textInputBins[i].color != incoming) ++i;
     if (i < g_textInputKinds) ++g_textInputBins[i].count;
@@ -824,6 +824,22 @@ int main(int argc, char** argv) {
         Pump(200);
     }
     const ComctlState ccAfterLoad = QueryComctl32();
+
+    bool themeProductAutotest = cfh::g_uxthemeHooks.load(std::memory_order_acquire) == 1;
+    const HTHEME themeTest = reinterpret_cast<HTHEME>(static_cast<UINT_PTR>(0xCF01));
+    const HTHEME themeUnknown = reinterpret_cast<HTHEME>(static_cast<UINT_PTR>(0xCF02));
+    themeProductAutotest &= cfh::IsButtonThemeClass(L"Button");
+    themeProductAutotest &= cfh::IsButtonThemeClass(L"Explorer::Button");
+    themeProductAutotest &= !cfh::IsButtonThemeClass(L"Button;Edit");
+    themeProductAutotest &= cfh::RememberTheme(themeTest, L"Button");
+    themeProductAutotest &= cfh::RememberTheme(themeTest, L"Button");
+    themeProductAutotest &= cfh::KnownButtonTheme(themeTest);
+    themeProductAutotest &= cfh::ReleaseTheme(themeTest) && cfh::KnownButtonTheme(themeTest);
+    themeProductAutotest &= cfh::ReleaseTheme(themeTest) && !cfh::KnownButtonTheme(themeTest);
+    themeProductAutotest &= !cfh::ReleaseTheme(themeUnknown) && !cfh::KnownButtonTheme(themeUnknown);
+    std::printf("autotest: UxTheme.product complete=%d classifier+refcount=%s\n",
+                cfh::g_uxthemeHooks.load(std::memory_order_acquire),
+                themeProductAutotest ? "PASS" : "INFRASTRUCTURE_FAILURE");
 
     std::vector<Autotest> tests;
     auto run = [&](const char* name, HookId id, auto&& fn) {
@@ -1650,6 +1666,7 @@ int main(int argc, char** argv) {
     const char* const stateTag[4] = {"N", "P", "D", "F"};
     const COLORREF classicOffFace =
         static_cast<COLORREF>(cfh::GetSysColor_Original(COLOR_BTNFACE));
+    bool productTextGate = true;
     for (const auto& tc : textConfigs) {
         if (!tc.button) continue;
         if (tc.optOut) {
@@ -1675,6 +1692,15 @@ int main(int argc, char** argv) {
             if (std::strcmp(tc.name, "classic") == 0 &&
                 ts[0][0].bg != (on ? exp3dFace : classicOffFace))
                 ++uEquivFail;
+            if (std::strcmp(tc.name, "themed") == 0 && on) {
+                for (int m = 0; m < 2; ++m) {
+                    productTextGate &= ts[0][m].bg == RGB(0xFD,0xFD,0xFD) &&
+                                       ts[0][m].t1 == RGB(0,0,0) && ts[0][m].t1N == 582;
+                    productTextGate &= ts[1][m].bg == RGB(0xCC,0xE4,0xF7) &&
+                                       ts[1][m].t1 == RGB(0,0,0) && ts[1][m].t1N == 582;
+                    productTextGate &= ts[2][m].t1 == RGB(0x83,0x83,0x83);
+                }
+            }
             std::printf("buttontext: %s/%s m=%d/4", tc.name, on ? "on" : "off", agree);
             for (int sIdx = 0; sIdx < 4; ++sIdx) {
                 const TextStats& t = ts[sIdx][0];
@@ -1694,6 +1720,8 @@ int main(int argc, char** argv) {
         }
     }
     cfp::Publish(cfp::Mode::ForceDark, {});
+    std::printf("buttontext: product push N/P=000000x582 D=838383 %s\n",
+                productTextGate ? "PASS" : "HOOK_BEHAVIOR_FAILURE");
 
     // ------------------------------------ Phase 9d: themed text causality
     // Measurement only. Intervene at the product SetTextColor hook for the
@@ -1830,6 +1858,8 @@ int main(int argc, char** argv) {
     if (!bfInfra) infraOk = false;  // 9a infrastructure
     if (!uInfra) infraOk = false;   // 9c infrastructure
     if (!text9dInfra) infraOk = false;  // 9d measurement infrastructure
+    if (!themeProductAutotest) infraOk = false;
+    if (!productTextGate) behaviorOk = false;
     if (!uBehavior) behaviorOk = false;  // 9c gates G1-G3
     if (!observerAutotest || !observerPassive) infraOk = false;
     if (!policyOk) behaviorOk = false;
