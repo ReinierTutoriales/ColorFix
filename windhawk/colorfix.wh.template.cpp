@@ -2,7 +2,7 @@
 // @id              colorfix
 // @name            ColorFix
 // @description     Phase 1 dark color compatibility for classic Win32 applications
-// @version         0.2.0
+// @version         0.2.1
 // @author          ReinierTutoriales
 // @include         ColorFixTest.exe
 // @architecture    x86-64
@@ -84,7 +84,13 @@ BOOL Wh_ModInit() {
         Wh_Log(L"ColorFix: policy listener failed; theme changes need a restart");
     // Hooks queued during Wh_ModInit are applied by Windhawk after it returns.
     // Wh_ApplyHookOperations is only for hooks queued after initialization.
-    if (!colorfix::hooks::RegisterPhase1Hooks(WindhawkRegisterHook)) {
+    const bool hooksOk = colorfix::hooks::RegisterPhase1Hooks(WindhawkRegisterHook);
+    Wh_Log(hooksOk ? L"ColorFix: phase1 core hooks ON"
+                   : L"ColorFix: phase1 core hooks FAILED");
+    Wh_Log(colorfix::hooks::g_uxthemeHooks.load(std::memory_order_acquire)
+               ? L"ColorFix: uxtheme hooks ON"
+               : L"ColorFix: uxtheme hooks OFF");
+    if (!hooksOk) {
         // Windhawk won't call later callbacks when Wh_ModInit returns FALSE.
         colorfix::runtime::StopListener();
         return FALSE;
