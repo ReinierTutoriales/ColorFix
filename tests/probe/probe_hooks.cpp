@@ -20,10 +20,13 @@
 #include <windows.h>
 #include <dwmapi.h>
 #include <tlhelp32.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include "MinHook.h"
@@ -130,7 +133,7 @@ void PaintClass(HDC dc) {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     const LONG_PTR tag = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
     const bool explicitPaint =
-        tag != 'K' && tag != 'C' && tag != 'V' && tag != 'L' && tag != 'T';
+        tag != 'K' && tag != 'C' && tag != 'V' && tag != 'L' && tag != 'T' && tag != 'U';
     switch (msg) {
     case WM_ERASEBKGND:
         if (explicitPaint) return 1;  // E paints its full client area itself
@@ -524,19 +527,115 @@ bool RegionEqual(const Capture& a, const Capture& b, const RECT& r) {
     return true;
 }
 
-// Telemetry only: UxTheme draws of one class/part at T's control size within
-// a range of observer events.
-long TDraws(LONG from, LONG to, const wchar_t* klass, int part) {
+// Telemetry only: UxTheme draws of one class/part at a control size within a
+// range of observer events.
+long SizeDraws(LONG from, LONG to, const wchar_t* klass, int part, int w, int h) {
     const LONG lo = from < uxo::kMaxEvents ? from : uxo::kMaxEvents;
     const LONG hi = to < uxo::kMaxEvents ? to : uxo::kMaxEvents;
     long n = 0;
     for (LONG i = lo; i < hi; ++i) {
         const auto& ev = uxo::g_events[i];
-        if (ev.kind == uxo::Event::Kind::Draw && ev.part == part && ev.width == kTW &&
-            ev.height == kTH && std::wcscmp(uxo::ThemeClass(ev.theme), klass) == 0)
+        if (ev.kind == uxo::Event::Kind::Draw && ev.part == part && ev.width == w &&
+            ev.height == h && std::wcscmp(uxo::ThemeClass(ev.theme), klass) == 0)
             ++n;
     }
     return n;
+}
+
+long TDraws(LONG from, LONG to, const wchar_t* klass, int part) {
+    return SizeDraws(from, to, klass, part, kTW, kTH);
+}
+
+// ------------------------------------------- increment 9c: button text (U)
+
+// U's controls are 82x72, distinct from V (90x80) and T (86x76), so the
+// size-based UxTheme attribution stays unambiguous.
+constexpr int kUW = 82, kUH = 72;
+constexpr int kClassicId = 106;
+constexpr RECT kUStatic{10, 10, 10 + kUW, 10 + kUH};
+constexpr RECT kUEdit{110, 10, 110 + kUW, 10 + kUH};
+constexpr RECT kUButton{210, 10, 210 + kUW, 10 + kUH};
+constexpr RECT kUClassic{10, 110, 10 + kUW, 110 + kUH};
+constexpr long kMinTextPixels = 40;  // below this the text was not captured
+HFONT g_textFont = nullptr;  // bold, NONANTIALIASED_QUALITY; created before hooks
+
+// v6 Static/Edit/Button under the activation context, like T; then a USER32
+// BUTTON outside it, the same class as window C's button. Both buttons carry
+// the text "MM" in g_textFont.
+bool CreateUChildren(HANDLE actx, HWND u) {
+    HINSTANCE inst = GetModuleHandleW(nullptr);
+    auto child = [&](const wchar_t* cls, const wchar_t* text, DWORD style, const RECT& r,
+                     int id) {
+        HWND h = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, r.left, r.top,
+                                 r.right - r.left, r.bottom - r.top, u,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), inst,
+                                 nullptr);
+        if (h && text[0])
+            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_textFont), FALSE);
+        return h != nullptr;
+    };
+    ULONG_PTR cookie = 0;
+    if (!ActivateActCtx(actx, &cookie)) return false;
+    const bool v6 = child(L"STATIC", L"", 0, kUStatic, kStaticId) &&
+                    child(L"EDIT", L"", WS_BORDER, kUEdit, kEditId) &&
+                    child(L"BUTTON", L"MM", BS_PUSHBUTTON, kUButton, kButtonId);
+    DeactivateActCtx(0, cookie);
+    return v6 && child(L"BUTTON", L"MM", BS_PUSHBUTTON, kUClassic, kClassicId);
+}
+
+HRESULT ApplyWindowTheme(HWND h, LPCWSTR app, LPCWSTR ids) {
+    using SetWindowTheme_t = HRESULT (WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+    const auto fn = reinterpret_cast<SetWindowTheme_t>(reinterpret_cast<void*>(
+        GetProcAddress(GetModuleHandleW(L"uxtheme.dll"), "SetWindowTheme")));
+    return fn ? fn(h, app, ids) : E_NOTIMPL;
+}
+
+// Observable color histogram of a control interior (inset 6 px). The most
+// frequent color is reported as the background; the next two are reported
+// with their pixel counts. Which of them is the text is a reading of the
+// output, not something this function decides.
+struct TextStats {
+    COLORREF bg = CLR_INVALID, t1 = CLR_INVALID, t2 = CLR_INVALID;
+    long bgN = 0, t1N = 0, t2N = 0;
+    int distinct = 0;
+};
+
+TextStats MeasureText(const Capture& c, const RECT& control) {
+    TextStats s;
+    if (c.px.empty()) return s;
+    std::vector<std::pair<COLORREF, long>> h;
+    for (int y = control.top + 6; y < control.bottom - 6; ++y) {
+        for (int x = control.left + 6; x < control.right - 6; ++x) {
+            const COLORREF v = At(c, x, y);
+            auto it = std::find_if(h.begin(), h.end(),
+                                   [v](const auto& e) { return e.first == v; });
+            if (it == h.end())
+                h.emplace_back(v, 1);
+            else
+                ++it->second;
+        }
+    }
+    std::sort(h.begin(), h.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    s.distinct = static_cast<int>(h.size());
+    if (h.size() > 0) { s.bg = h[0].first; s.bgN = h[0].second; }
+    if (h.size() > 1) { s.t1 = h[1].first; s.t1N = h[1].second; }
+    if (h.size() > 2) { s.t2 = h[2].first; s.t2N = h[2].second; }
+    return s;
+}
+
+// WCAG 2 contrast ratio between two sRGB colors; 0 when either is missing.
+double ContrastRatio(COLORREF a, COLORREF b) {
+    if (a == CLR_INVALID || b == CLR_INVALID) return 0.0;
+    auto channel = [](int v) {
+        const double c = v / 255.0;
+        return c <= 0.04045 ? c / 12.92 : std::pow((c + 0.055) / 1.055, 2.4);
+    };
+    auto lum = [&](COLORREF c) {
+        return 0.2126 * channel(GetRValue(c)) + 0.7152 * channel(GetGValue(c)) +
+               0.0722 * channel(GetBValue(c));
+    };
+    const double la = lum(a), lb = lum(b);
+    return la > lb ? (la + 0.05) / (lb + 0.05) : (lb + 0.05) / (la + 0.05);
 }
 
 BOOL CALLBACK ForwardSysColorChange(HWND child, LPARAM) {
@@ -563,7 +662,7 @@ int main(int argc, char** argv) {
         }
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    std::printf("ColorFixProbe increment 9b - FillRect system brush identity (classic face)\n");
+    std::printf("ColorFixProbe increment 9c - button text and scoped theme opt-out (U)\n");
 #if defined(_M_ARM64)
     std::printf("arch: ARM64\n");
 #elif defined(_M_X64) || defined(__x86_64__)
@@ -577,6 +676,9 @@ int main(int argc, char** argv) {
     g_magenta = CreateSolidBrush(kMagenta);
     g_green = CreateSolidBrush(kGreen);
     g_orange = CreateSolidBrush(kOrange);
+    g_textFont = CreateFontW(-28, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
+                             DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -594,6 +696,11 @@ int main(int argc, char** argv) {
     HWND winT = MakeWindow(wc.lpszClassName, 'T', 560, 450);
     if (!winT) {
         std::printf("setup: T window failed (%lu)\n", GetLastError());
+        return 3;
+    }
+    HWND winU = MakeWindow(wc.lpszClassName, 'U', 100, 780);
+    if (!winU || !g_textFont) {
+        std::printf("setup: U window or text font failed (%lu)\n", GetLastError());
         return 3;
     }
     HANDLE v6ctx = CreateV6ActCtx();
@@ -648,7 +755,8 @@ int main(int argc, char** argv) {
     WindowShot baseV, baseL;
     bool v6Ok = true;
     if (late) {
-        v6Ok = CreateV6Children(v6ctx, winV, winL) && CreateTChildren(v6ctx, winT);
+        v6Ok = CreateV6Children(v6ctx, winV, winL) && CreateTChildren(v6ctx, winT) &&
+               CreateUChildren(v6ctx, winU);
         Pump(200);
         baseV = Shoot(winV);
         baseL = Shoot(winL);
@@ -679,7 +787,8 @@ int main(int argc, char** argv) {
 
     // Order "early": hooks are live before comctl32 v6 is first loaded.
     if (!late) {
-        v6Ok = CreateV6Children(v6ctx, winV, winL) && CreateTChildren(v6ctx, winT);
+        v6Ok = CreateV6Children(v6ctx, winV, winL) && CreateTChildren(v6ctx, winT) &&
+               CreateUChildren(v6ctx, winU);
         Pump(200);
     }
     const ComctlState ccAfterLoad = QueryComctl32();
@@ -1344,10 +1453,153 @@ int main(int argc, char** argv) {
     PrintRgb(bfLive);
     std::printf(" %s\n", bfProductLive ? "LIVE" : "INFRASTRUCTURE_FAILURE");
 
+    // ------------------------------------ Phase 9c: button text and scoped opt-out
+    // Measurement only: no product change. Policy ON unless a step says OFF,
+    // product hooks live, UxTheme observer live again after 9a. Gates: G1 the
+    // U button alone goes themed -> opted out (COVERED face) -> exactly
+    // restored; G2 its themed Static/Edit siblings do not change; G3 the 82x72
+    // Button draws vanish while opted out and Edit draws continue. Text colors
+    // and contrast are findings.
+    std::printf("\n[button text 9c] U: scoped theme opt-out and text colors\n");
+    bool uInfra = true, uBehavior = true;
+    const HWND uButton = GetDlgItem(winU, kButtonId);
+    const HWND uClassic = GetDlgItem(winU, kClassicId);
+    if (!uButton || !uClassic) uInfra = false;
+    auto uShoot = [&](HWND button) {
+        if (button)
+            RedrawWindow(button, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+        WindowShot s = Shoot(winU);
+        for (int m = 0; m < 2; ++m) {
+            COLORREF c = CLR_INVALID;
+            if (s.mode[m].px.empty() || !SurfaceColor(s.mode[m], kMagentaRect, &c) ||
+                c != kMagenta)
+                uInfra = false;
+        }
+        return s;
+    };
+    cfp::Publish(cfp::Mode::ForceDark, {});
+    const LONG uEv0 = uxo::g_eventCount;
+    const WindowShot uThemed = uShoot(uButton);
+    const LONG uEvOff = uxo::g_eventCount;
+    const HRESULT uOffHr = ApplyWindowTheme(uButton, L"", L"");
+    Pump(100);
+    const WindowShot uOff = uShoot(uButton);
+    const LONG uEvRestore = uxo::g_eventCount;
+    const HRESULT uRestoreHr = ApplyWindowTheme(uButton, nullptr, nullptr);
+    Pump(100);
+    const WindowShot uRestored = uShoot(uButton);
+    const LONG uEvEnd = uxo::g_eventCount;
+    if (FAILED(uOffHr) || FAILED(uRestoreHr)) uInfra = false;
+
+    bool g1 = true, g2 = true;
+    for (int m = 0; m < 2; ++m) {
+        if (MeasureText(uOff.mode[m], kUButton).bg != exp3dFace) g1 = false;
+        if (!RegionEqual(uThemed.mode[m], uRestored.mode[m], kUButton)) g1 = false;
+        for (const RECT* r : {&kUStatic, &kUEdit})
+            if (!RegionEqual(uThemed.mode[m], uOff.mode[m], *r) ||
+                !RegionEqual(uThemed.mode[m], uRestored.mode[m], *r))
+                g2 = false;
+    }
+    if (!g1 || !g2) uBehavior = false;
+    std::printf("buttontext: gate-9c G1 button themed=");
+    PrintRgb(MeasureText(uThemed.mode[0], kUButton).bg);
+    std::printf(" off=");
+    PrintRgb(MeasureText(uOff.mode[0], kUButton).bg);
+    std::printf(" restored=%s %s\n",
+                RegionEqual(uThemed.mode[0], uRestored.mode[0], kUButton) ? "SAME" : "DIFFERENT",
+                g1 ? "PASS" : "FAIL");
+    std::printf("buttontext: gate-9c G2 siblings static/edit unchanged %s\n",
+                g2 ? "PASS" : "FAIL");
+
+    const long uBtn[3] = {SizeDraws(uEv0, uEvOff, L"Button", 1, kUW, kUH),
+                          SizeDraws(uEvOff, uEvRestore, L"Button", 1, kUW, kUH),
+                          SizeDraws(uEvRestore, uEvEnd, L"Button", 1, kUW, kUH)};
+    const long uEdit[3] = {SizeDraws(uEv0, uEvOff, L"Edit", 3, kUW, kUH),
+                           SizeDraws(uEvOff, uEvRestore, L"Edit", 3, kUW, kUH),
+                           SizeDraws(uEvRestore, uEvEnd, L"Edit", 3, kUW, kUH)};
+    const bool g3Interpretable = uBtn[0] > 0 && uEdit[0] > 0;
+    const bool g3 = uBtn[1] == 0 && uEdit[1] > 0 && uBtn[2] > 0;
+    if (g3Interpretable && !g3) uBehavior = false;
+    std::printf("buttontext: gate-9c G3 %dx%d Button pre=%ld off=%ld restored=%ld"
+                " Edit pre=%ld off=%ld restored=%ld %s\n",
+                kUW, kUH, uBtn[0], uBtn[1], uBtn[2], uEdit[0], uEdit[1], uEdit[2],
+                !g3Interpretable ? "INCONCLUSIVE" : g3 ? "PASS" : "FAIL");
+
+    // Text matrix: 3 configurations x policy OFF/ON x 4 deterministic states.
+    // Per state: background:top1xN,top2xN,distinct,contrast(background, top1)
+    // from flags0; m= counts states whose bg/top1/top2 agree across both
+    // capture modes. The classic face must match window C's (OFF F0F0F0, ON
+    // mapped): an equivalence requirement for the measurement, not a finding.
+    auto uApplyState = [](HWND b, int state, bool on) {
+        switch (state) {
+        case 1: SendMessageW(b, BM_SETSTATE, on ? TRUE : FALSE, 0); break;
+        case 2: EnableWindow(b, on ? FALSE : TRUE); break;
+        case 3: SendMessageW(b, BM_SETSTYLE, on ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON, TRUE); break;
+        default: break;
+        }
+    };
+    struct TextConfig { const char* name; HWND button; RECT rect; bool optOut; };
+    const TextConfig textConfigs[] = {
+        {"classic", uClassic, kUClassic, false},
+        {"themed",  uButton,  kUButton,  false},
+        {"optout",  uButton,  kUButton,  true},
+    };
+    const char* const stateTag[4] = {"N", "P", "D", "F"};
+    const COLORREF classicOffFace =
+        static_cast<COLORREF>(cfh::GetSysColor_Original(COLOR_BTNFACE));
+    for (const auto& tc : textConfigs) {
+        if (!tc.button) continue;
+        if (tc.optOut) {
+            if (FAILED(ApplyWindowTheme(tc.button, L"", L""))) uInfra = false;
+            Pump(100);
+        }
+        for (int on = 0; on < 2; ++on) {
+            cfp::Publish(on ? cfp::Mode::ForceDark : cfp::Mode::Disabled, {});
+            TextStats ts[4][2];
+            int agree = 0;
+            for (int sIdx = 0; sIdx < 4; ++sIdx) {
+                uApplyState(tc.button, sIdx, true);
+                Pump(50);
+                const WindowShot shot = uShoot(tc.button);
+                for (int m = 0; m < 2; ++m) ts[sIdx][m] = MeasureText(shot.mode[m], tc.rect);
+                uApplyState(tc.button, sIdx, false);
+                Pump(50);
+                if (ts[sIdx][0].t1N < kMinTextPixels) uInfra = false;
+                if (ts[sIdx][0].bg == ts[sIdx][1].bg && ts[sIdx][0].t1 == ts[sIdx][1].t1 &&
+                    ts[sIdx][0].t2 == ts[sIdx][1].t2)
+                    ++agree;
+            }
+            if (std::strcmp(tc.name, "classic") == 0 &&
+                ts[0][0].bg != (on ? exp3dFace : classicOffFace))
+                uInfra = false;
+            std::printf("buttontext: %s/%s m=%d/4", tc.name, on ? "on" : "off", agree);
+            for (int sIdx = 0; sIdx < 4; ++sIdx) {
+                const TextStats& t = ts[sIdx][0];
+                std::printf(" %s=", stateTag[sIdx]);
+                PrintRgb(t.bg);
+                std::printf("x%ld:", t.bgN);
+                PrintRgb(t.t1);
+                std::printf("x%ld,", t.t1N);
+                PrintRgb(t.t2);
+                std::printf("x%ld,d%d,cr%.1f", t.t2N, t.distinct, ContrastRatio(t.bg, t.t1));
+            }
+            std::printf("\n");
+        }
+        if (tc.optOut) {
+            if (FAILED(ApplyWindowTheme(tc.button, nullptr, nullptr))) uInfra = false;
+            Pump(100);
+        }
+    }
+    cfp::Publish(cfp::Mode::ForceDark, {});
+    std::printf("buttontext: infrastructure %s\n", uInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
+
     // ------------------------------------------------------------ report
     bool infraOk = true, behaviorOk = true;
     if (!ctlOk) infraOk = false;  // DeleteObject.pass has no valid control
     if (!bfInfra) infraOk = false;  // 9a infrastructure
+    if (!uInfra) infraOk = false;   // 9c infrastructure
+    if (!uBehavior) behaviorOk = false;  // 9c gates G1-G3
     if (!observerAutotest || !observerPassive) infraOk = false;
     if (!policyOk) behaviorOk = false;
 
@@ -1739,6 +1991,7 @@ int main(int argc, char** argv) {
     DestroyWindow(winV);
     DestroyWindow(winL);
     DestroyWindow(winT);
+    DestroyWindow(winU);
     ReleaseActCtx(v6ctx);
     return code;
 }
