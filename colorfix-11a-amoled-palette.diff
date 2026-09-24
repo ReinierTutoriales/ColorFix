@@ -1,0 +1,989 @@
+From d94a441123c4470959ad55266d94487bbd439864 Mon Sep 17 00:00:00 2001
+From: ColorFix <colorfix@local>
+Date: Thu, 24 Sep 2026 19:13:58 +0000
+Subject: [PATCH] 11a: AMOLED palette, text/fill literal mapping, atomic
+ mode+palette configuration
+
+---
+ core/colorfix_color.hpp           | 19 ++----
+ core/colorfix_literal.hpp         | 43 ++++++++++++++
+ core/colorfix_mapper.hpp          | 16 +++--
+ core/colorfix_palette.hpp         | 18 ++++++
+ core/colorfix_policy.hpp          | 40 +++++++++++--
+ core/colorfix_roles.hpp           | 52 ++++++++++++++++-
+ docs/design-premises.md           | 29 +++++++++
+ hooks/colorfix_hooks.hpp          | 86 +++++++++++++++++----------
+ hooks/colorfix_runtime.hpp        | 80 +++++++++++++++++--------
+ tests/core_check.cpp              | 97 ++++++++++++++++++++++++++++---
+ tests/probe/probe_hooks.cpp       | 37 +++++++-----
+ windhawk/colorfix.wh.template.cpp | 33 +++++++++--
+ 12 files changed, 438 insertions(+), 112 deletions(-)
+ create mode 100644 core/colorfix_literal.hpp
+ create mode 100644 core/colorfix_palette.hpp
+
+diff --git a/core/colorfix_color.hpp b/core/colorfix_color.hpp
+index d565143..2273044 100644
+--- a/core/colorfix_color.hpp
++++ b/core/colorfix_color.hpp
+@@ -19,20 +19,11 @@ constexpr COLORREF Rgb(BYTE r, BYTE g, BYTE b) noexcept {
+                                  (static_cast<DWORD>(b) << 16));
+ }
+ 
+-constexpr COLORREF MapLiteralColor(COLORREF c) noexcept {
+-    if (IsSpecialColor(c)) return c;
+-    const auto r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
+-    const unsigned luma = (54u * r + 183u * g + 19u * b) >> 8;
+-
+-    // Keep ColorFix's own palette as fixed points. Hooks can observe colors
+-    // already returned by semantic mappings.
+-    if (c == Rgb(32,32,32) || c == Rgb(45,45,45) || c == Rgb(37,37,37) ||
+-        c == Rgb(48,48,48) || c == Rgb(65,65,65) || c == Rgb(85,85,85) ||
+-        c == Rgb(145,145,145) || c == Rgb(220,220,220)) return c;
+-
+-    if (luma >= 235u) return Rgb(32, 32, 32);
+-    if (luma <= 20u) return Rgb(220, 220, 220);
+-    return c;
++constexpr unsigned Luma(COLORREF c) noexcept {
++    return (54u * GetRValue(c) + 183u * GetGValue(c) + 19u * GetBValue(c)) >> 8;
+ }
+ 
++inline constexpr unsigned kLightLuma = 235u;  // literal considered "white"
++inline constexpr unsigned kDarkLuma  = 20u;   // literal considered "black"
++
+ } // namespace colorfix
+diff --git a/core/colorfix_literal.hpp b/core/colorfix_literal.hpp
+new file mode 100644
+index 0000000..3783005
+--- /dev/null
++++ b/core/colorfix_literal.hpp
+@@ -0,0 +1,43 @@
++#pragma once
++#include <windows.h>
++#include "colorfix_color.hpp"
++#include "colorfix_palette.hpp"
++#include "colorfix_roles.hpp"
++
++// Literal (application-chosen) color mapping, split by what the color paints.
++// Increment 11a: with the AMOLED palette #000000 is both a semantic surface
++// color and the most common literal text color, so one shared mapping cannot
++// be correct for both. Each hook declares whether it maps text or a fill.
++namespace colorfix {
++
++// Default palette: exactly the pre-11a behavior for text and fills alike
++// (tests/core_check.cpp compares it against a frozen copy of the old mapper).
++// Semantic colors are fixed points; white -> COLOR_WINDOW, black -> text.
++constexpr COLORREF MapLiteralDefault(COLORREF c) noexcept {
++    if (IsSpecialColor(c) || IsSemanticColor(Palette::Default, c)) return c;
++    const unsigned luma = Luma(c);
++    if (luma >= kLightLuma) return MapSystemColorDefault(COLOR_WINDOW, c);
++    if (luma <= kDarkLuma) return MapSystemColorDefault(COLOR_WINDOWTEXT, c);
++    return c;
++}
++
++// Text (SetTextColor). AMOLED: dark text is never kept, including #000000,
++// which is deliberately NOT a fixed point on this path. Light text is kept:
++// AMOLED keeps black literal fills black, so white-on-black stays readable.
++constexpr COLORREF MapLiteralText(Palette palette, COLORREF c) noexcept {
++    if (palette == Palette::Default) return MapLiteralDefault(c);
++    if (IsSpecialColor(c)) return c;
++    if (Luma(c) <= kDarkLuma) return MapSystemColorAmoled(COLOR_WINDOWTEXT, c);
++    return c;
++}
++
++// Fills (SetBkColor, CreateSolidBrush). AMOLED: semantic colors are fixed
++// points, light fills become the black surface, dark fills stay dark.
++constexpr COLORREF MapLiteralFill(Palette palette, COLORREF c) noexcept {
++    if (palette == Palette::Default) return MapLiteralDefault(c);
++    if (IsSpecialColor(c) || IsSemanticColor(Palette::Amoled, c)) return c;
++    if (Luma(c) >= kLightLuma) return MapSystemColorAmoled(COLOR_WINDOW, c);
++    return c;
++}
++
++} // namespace colorfix
+diff --git a/core/colorfix_mapper.hpp b/core/colorfix_mapper.hpp
+index 5ff4c1c..4ebcfbb 100644
+--- a/core/colorfix_mapper.hpp
++++ b/core/colorfix_mapper.hpp
+@@ -1,17 +1,23 @@
+ #pragma once
+ #include <windows.h>
+ #include "colorfix_color.hpp"
++#include "colorfix_literal.hpp"
++#include "colorfix_palette.hpp"
+ #include "colorfix_roles.hpp"
+ 
+ namespace colorfix {
+ 
++// Aggregation point for hooks. There is intentionally no palette-less or
++// role-less literal mapping: callers state the palette and text vs fill.
+ struct ColorMapper final {
+-    static constexpr COLORREF Literal(COLORREF value) noexcept {
+-        return MapLiteralColor(value);
++    static constexpr COLORREF Text(Palette p, COLORREF value) noexcept {
++        return MapLiteralText(p, value);
+     }
+-
+-    static constexpr COLORREF System(int index, COLORREF original) noexcept {
+-        return MapSystemColor(index, original);
++    static constexpr COLORREF Fill(Palette p, COLORREF value) noexcept {
++        return MapLiteralFill(p, value);
++    }
++    static constexpr COLORREF System(Palette p, int index, COLORREF original) noexcept {
++        return MapSystemColor(p, index, original);
+     }
+ };
+ 
+diff --git a/core/colorfix_palette.hpp b/core/colorfix_palette.hpp
+new file mode 100644
+index 0000000..08a79e1
+--- /dev/null
++++ b/core/colorfix_palette.hpp
+@@ -0,0 +1,18 @@
++#pragma once
++
++namespace colorfix {
++
++// Dark palette selected by the host. Independent of policy::Mode: the mode
++// decides whether ColorFix is active, the palette decides which dark colors.
++enum class Palette : unsigned char {
++    Default = 0,  // phase 1 palette (#202020 surfaces), unchanged since 9f
++    Amoled  = 1,  // pure black (#000000) surfaces
++};
++
++inline constexpr int kPaletteCount = 2;
++
++constexpr int PaletteIndex(Palette p) noexcept {
++    return p == Palette::Amoled ? 1 : 0;
++}
++
++} // namespace colorfix
+diff --git a/core/colorfix_policy.hpp b/core/colorfix_policy.hpp
+index 1d0b5d0..5ff56fe 100644
+--- a/core/colorfix_policy.hpp
++++ b/core/colorfix_policy.hpp
+@@ -3,6 +3,8 @@
+ #include <windows.h>
+ #include <atomic>
+ 
++#include "colorfix_palette.hpp"
++
+ namespace colorfix::policy {
+ 
+ enum class Mode : unsigned char {
+@@ -26,16 +28,42 @@ constexpr bool EffectiveDark(Mode mode, Signals signals) noexcept {
+     return false;
+ }
+ 
+-// Fail-safe default: inactive (pass-through) until a host adapter publishes an
+-// explicit mode with real signals. Hooks only pay one relaxed atomic load.
+-inline std::atomic<bool> g_effectiveDark{false};
++// Published state: effective activity and palette in ONE atomic byte, so a
++// hook that loads it once never combines the activity of one configuration
++// with the palette of another. Bit 0 = active, bit 1 = AMOLED palette.
++// Fail-safe default: inactive (pass-through), Default palette, until a host
++// adapter publishes an explicit mode with real signals.
++struct State {
++    bool active = false;
++    Palette palette = Palette::Default;
++};
++
++constexpr unsigned char EncodeState(bool active, Palette palette) noexcept {
++    return static_cast<unsigned char>((active ? 1u : 0u) |
++                                      (palette == Palette::Amoled ? 2u : 0u));
++}
++
++constexpr State DecodeState(unsigned char raw) noexcept {
++    return State{(raw & 1u) != 0, (raw & 2u) != 0 ? Palette::Amoled : Palette::Default};
++}
++
++inline std::atomic<unsigned char> g_state{EncodeState(false, Palette::Default)};
++
++// Hooks: one relaxed load per call, then use the returned copy only.
++inline State Current() noexcept {
++    return DecodeState(g_state.load(std::memory_order_relaxed));
++}
+ 
+ inline bool Active() noexcept {
+-    return g_effectiveDark.load(std::memory_order_relaxed);
++    return Current().active;
++}
++
++inline void PublishState(bool active, Palette palette) noexcept {
++    g_state.store(EncodeState(active, palette), std::memory_order_relaxed);
+ }
+ 
+-inline void Publish(Mode mode, Signals signals) noexcept {
+-    g_effectiveDark.store(EffectiveDark(mode, signals), std::memory_order_relaxed);
++inline void Publish(Mode mode, Palette palette, Signals signals) noexcept {
++    PublishState(EffectiveDark(mode, signals), palette);
+ }
+ 
+ inline bool ReadWindowsSignals(Signals* out) noexcept {
+diff --git a/core/colorfix_roles.hpp b/core/colorfix_roles.hpp
+index 14225de..c44ea1c 100644
+--- a/core/colorfix_roles.hpp
++++ b/core/colorfix_roles.hpp
+@@ -1,10 +1,13 @@
+ #pragma once
+ #include <windows.h>
+ #include "colorfix_color.hpp"
++#include "colorfix_palette.hpp"
+ 
+ namespace colorfix {
+ 
+-constexpr COLORREF MapSystemColor(int index, COLORREF original) noexcept {
++// Semantic system-color mapping. Every index returned mapped here is a
++// "semantic color" of that palette (see kMappedSysColors).
++constexpr COLORREF MapSystemColorDefault(int index, COLORREF original) noexcept {
+     switch (index) {
+     case COLOR_WINDOW:       return Rgb(32, 32, 32);
+     case COLOR_WINDOWTEXT:   return Rgb(220, 220, 220);
+@@ -27,4 +30,51 @@ constexpr COLORREF MapSystemColor(int index, COLORREF original) noexcept {
+     }
+ }
+ 
++// AMOLED: primary surfaces are pure black; borders, scroll track and tooltip
++// stay non-black so classic edges remain distinguishable on #000000.
++constexpr COLORREF MapSystemColorAmoled(int index, COLORREF original) noexcept {
++    switch (index) {
++    case COLOR_WINDOW:       return Rgb(0, 0, 0);
++    case COLOR_WINDOWTEXT:   return Rgb(220, 220, 220);
++    case COLOR_BTNFACE:      return Rgb(0, 0, 0);
++    case COLOR_BTNTEXT:      return Rgb(220, 220, 220);
++    case COLOR_GRAYTEXT:     return Rgb(145, 145, 145);
++    case COLOR_3DSHADOW:     return Rgb(64, 64, 64);
++    case COLOR_3DHILIGHT:    return Rgb(80, 80, 80);
++    case COLOR_3DLIGHT:      return Rgb(56, 56, 56);
++    case COLOR_3DDKSHADOW:   return Rgb(30, 30, 30);
++    case COLOR_WINDOWFRAME:  return Rgb(64, 64, 64);
++    case COLOR_APPWORKSPACE: return Rgb(0, 0, 0);
++    case COLOR_SCROLLBAR:    return Rgb(26, 26, 26);
++    case COLOR_MENU:         return Rgb(0, 0, 0);
++    case COLOR_MENUTEXT:     return Rgb(220, 220, 220);
++    case COLOR_MENUBAR:      return Rgb(0, 0, 0);
++    case COLOR_INFOBK:       return Rgb(26, 26, 26);
++    case COLOR_INFOTEXT:     return Rgb(220, 220, 220);
++    default:                 return original;
++    }
++}
++
++constexpr COLORREF MapSystemColor(Palette palette, int index, COLORREF original) noexcept {
++    return palette == Palette::Amoled ? MapSystemColorAmoled(index, original)
++                                      : MapSystemColorDefault(index, original);
++}
++
++// Indices remapped by both palettes. Keep in sync with the switches above;
++// tests/core_check.cpp asserts that no other index in [0, COLOR_MENUBAR] is
++// remapped.
++inline constexpr int kMappedSysColors[] = {
++    COLOR_WINDOW, COLOR_WINDOWTEXT, COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT,
++    COLOR_3DSHADOW, COLOR_3DHILIGHT, COLOR_3DLIGHT, COLOR_3DDKSHADOW,
++    COLOR_WINDOWFRAME, COLOR_APPWORKSPACE, COLOR_SCROLLBAR, COLOR_MENU,
++    COLOR_MENUTEXT, COLOR_MENUBAR, COLOR_INFOBK, COLOR_INFOTEXT,
++};
++
++// True when `c` is a semantic color produced by `palette`.
++constexpr bool IsSemanticColor(Palette palette, COLORREF c) noexcept {
++    for (int index : kMappedSysColors)
++        if (MapSystemColor(palette, index, CLR_INVALID) == c) return true;
++    return false;
++}
++
+ } // namespace colorfix
+diff --git a/docs/design-premises.md b/docs/design-premises.md
+index 9b6797a..a687f6e 100644
+--- a/docs/design-premises.md
++++ b/docs/design-premises.md
+@@ -498,6 +498,35 @@ inside Windhawk; keep that distinction explicit.
+ - Preserve the distinction between documented API behavior, measured ColorFix
+   behavior, and implementation assumptions.
+ 
++## Increment 11a: palettes and literal-color roles
++
++Decided in increment 11a (design; runtime evidence pending in CI and in the
++Windhawk integration test):
++
++- Mode (Disabled / ForceDark / FollowSystem) and palette (Default / AMOLED)
++  are independent dimensions. The host reads both once and applies them as one
++  configuration (`runtime::SetConfiguration`).
++- Activity and palette are published in one atomic byte
++  (`policy::g_state`). Hooks load it once per call and use that copy only.
++- Repaint happens when activity changes, and also when the palette changes
++  while ColorFix stays active.
++- Literal colors are mapped by role. `MapLiteralText` (SetTextColor) and
++  `MapLiteralFill` (SetBkColor, CreateSolidBrush) replace the shared
++  `MapLiteralColor`, which no longer exists. Reason: with AMOLED, #000000 is
++  both the semantic surface color and the most common literal text color.
++- AMOLED invariants (compile-time, tests/core_check.cpp): text #000000 ->
++  #DCDCDC; fill #000000 -> #000000; fill #FFFFFF -> #000000; every semantic
++  color of the active palette is a fixed point of the fill path.
++- The 9f exception keeps precedence over `MapLiteralText` in every palette.
++- The Default palette is unchanged: text and fill mapping equal the pre-11a
++  mapper for every grey and a 6x6x6 RGB lattice (frozen oracle in
++  tests/core_check.cpp). CI evidence from 9b-9f therefore still applies.
++- System brushes: one never-deleted bank per palette. The palette is captured
++  before selecting/creating a brush, so a concurrent switch cannot publish a
++  brush of one palette in the other palette's slot.
++- Not assumed: that every AMOLED role is visible in real applications. That
++  depends on which paint paths reach the hooks and must be measured.
++
+ ## 12. Maintenance rule
+ 
+ Update this document when an increment:
+diff --git a/hooks/colorfix_hooks.hpp b/hooks/colorfix_hooks.hpp
+index 314c610..ddb2b28 100644
+--- a/hooks/colorfix_hooks.hpp
++++ b/hooks/colorfix_hooks.hpp
+@@ -234,10 +234,13 @@ inline HRESULT WINAPI DrawThemeTextEx_Hook(HTHEME theme, HDC dc, int part, int s
+     return DrawThemeTextEx_Original(theme, dc, part, state, text, count, flags, rc, opts);
+ }
+ 
+-// One process-lifetime brush per system color index, derived from core roles.
+-// COLOR_MENUBAR (30) is the highest defined index.
++// One process-lifetime brush per (palette, system color index), derived from
++// core roles. Brushes are never recolored nor deleted (applications may hold
++// the handles), so each palette owns its own bank: a palette switch selects
++// the other bank instead of invalidating anything. COLOR_MENUBAR (30) is the
++// highest defined index.
+ inline constexpr int kSysColorCount = COLOR_MENUBAR + 1;
+-inline std::atomic<HBRUSH> g_brushes[kSysColorCount];
++inline std::atomic<HBRUSH> g_brushes[colorfix::kPaletteCount][kSysColorCount];
+ 
+ // Identity cache of the system color brush handles, one per index. Filled
+ // before any hook exists (RegisterPhase1Hooks), never inside a detour. Whether
+@@ -272,20 +275,25 @@ inline int SystemBrushIndex(HBRUSH brush) {
+ 
+ inline bool IsColorFixBrush(HGDIOBJ obj) {
+     if (!obj) return false;
+-    for (const auto& slot : g_brushes)
+-        if (slot.load(std::memory_order_relaxed) == obj) return true;
++    for (const auto& bank : g_brushes)
++        for (const auto& slot : bank)
++            if (slot.load(std::memory_order_relaxed) == obj) return true;
+     return false;
+ }
+ 
+-// Returns the ColorFix brush for a system color index, or nullptr when the
+-// role is not remapped (caller falls back to the original API).
+-inline HBRUSH SemanticBrush(int index) {
++// Returns the ColorFix brush for a system color index in `palette`, or
++// nullptr when the role is not remapped (caller falls back to the original
++// API). The palette is captured by the caller from one policy::Current() load
++// BEFORE this call, and both the color and the slot derive from it, so a
++// concurrent palette switch cannot publish an AMOLED brush in the Default
++// bank or vice versa.
++inline HBRUSH SemanticBrush(colorfix::Palette palette, int index) {
+     if (index < 0 || index >= kSysColorCount) return nullptr;
+     const COLORREF original = static_cast<COLORREF>(GetSysColor_Original(index));
+-    const COLORREF mapped = colorfix::MapSystemColor(index, original);
++    const COLORREF mapped = colorfix::MapSystemColor(palette, index, original);
+     if (mapped == original) return nullptr;
+ 
+-    auto& slot = g_brushes[index];
++    auto& slot = g_brushes[colorfix::PaletteIndex(palette)][index];
+     if (HBRUSH brush = slot.load(std::memory_order_acquire)) return brush;
+ 
+     HBRUSH created = CreateSolidBrush_Original(mapped);  // bypass literal mapping
+@@ -300,32 +308,39 @@ inline HBRUSH SemanticBrush(int index) {
+ 
+ inline DWORD WINAPI GetSysColor_Hook(int index) {
+     COLORFIX_PROBE_HIT(GetSysColor);
+-    if (!colorfix::policy::Active()) return GetSysColor_Original(index);
++    const colorfix::policy::State st = colorfix::policy::Current();
++    if (!st.active) return GetSysColor_Original(index);
+     const COLORREF original = static_cast<COLORREF>(GetSysColor_Original(index));
+-    return colorfix::MapSystemColor(index, original);
++    return colorfix::MapSystemColor(st.palette, index, original);
+ }
+ 
+ inline HBRUSH WINAPI GetSysColorBrush_Hook(int index) {
+     COLORFIX_PROBE_HIT(GetSysColorBrush);
+-    if (!colorfix::policy::Active()) return GetSysColorBrush_Original(index);
+-    if (HBRUSH brush = SemanticBrush(index)) return brush;
++    const colorfix::policy::State st = colorfix::policy::Current();
++    if (!st.active) return GetSysColorBrush_Original(index);
++    if (HBRUSH brush = SemanticBrush(st.palette, index)) return brush;
+     return GetSysColorBrush_Original(index);
+ }
+ 
+ inline HGDIOBJ WINAPI GetStockObject_Hook(int object) {
+     COLORFIX_PROBE_HIT(GetStockObject);
+-    if (!colorfix::policy::Active()) return GetStockObject_Original(object);
++    const colorfix::policy::State st = colorfix::policy::Current();
++    if (!st.active) return GetStockObject_Original(object);
+     // Only WHITE_BRUSH is treated as a window background. BLACK_BRUSH is used
+     // for frames, text and masks: leave it untouched in Phase 1.
+     if (object == WHITE_BRUSH)
+-        if (HBRUSH brush = SemanticBrush(COLOR_WINDOW)) return brush;
++        if (HBRUSH brush = SemanticBrush(st.palette, COLOR_WINDOW)) return brush;
+     return GetStockObject_Original(object);
+ }
+ 
+ inline COLORREF WINAPI SetTextColor_Hook(HDC dc, COLORREF color) {
+     COLORFIX_PROBE_HIT(SetTextColor);
+-    if (!colorfix::policy::Active()) return SetTextColor_Original(dc, color);
+-    COLORREF mapped = colorfix::MapLiteralColor(color);
++    const colorfix::policy::State st = colorfix::policy::Current();
++    if (!st.active) return SetTextColor_Original(dc, color);
++    COLORREF mapped = colorfix::MapLiteralText(st.palette, color);
++    // 9f exception takes precedence over MapLiteralText in every palette:
++    // known single-class Button theme, part 1 (BP_PUSHBUTTON) keeps the
++    // caller's color, or the themed push button text becomes unreadable.
+     const ThemeTextContext text = CurrentThemeText();
+     if (text.part == 1 && KnownButtonTheme(text.theme)) mapped = color;
+ #if defined(COLORFIX_PROBE)
+@@ -337,14 +352,16 @@ inline COLORREF WINAPI SetTextColor_Hook(HDC dc, COLORREF color) {
+ 
+ inline COLORREF WINAPI SetBkColor_Hook(HDC dc, COLORREF color) {
+     COLORFIX_PROBE_HIT(SetBkColor);
+-    if (!colorfix::policy::Active()) return SetBkColor_Original(dc, color);
+-    return SetBkColor_Original(dc, colorfix::MapLiteralColor(color));
++    const colorfix::policy::State st = colorfix::policy::Current();
++    if (!st.active) return SetBkColor_Original(dc, color);
++    return SetBkColor_Original(dc, colorfix::MapLiteralFill(st.palette, color));
+ }
+ 
+ inline HBRUSH WINAPI CreateSolidBrush_Hook(COLORREF color) {
+     COLORFIX_PROBE_HIT(CreateSolidBrush);
+-    if (!colorfix::policy::Active()) return CreateSolidBrush_Original(color);
+-    return CreateSolidBrush_Original(colorfix::MapLiteralColor(color));
++    const colorfix::policy::State st = colorfix::policy::Current();
++    if (!st.active) return CreateSolidBrush_Original(color);
++    return CreateSolidBrush_Original(colorfix::MapLiteralFill(st.palette, color));
+ }
+ 
+ inline BOOL WINAPI DeleteObject_Hook(HGDIOBJ obj) {
+@@ -361,10 +378,10 @@ inline BOOL WINAPI DeleteObject_Hook(HGDIOBJ obj) {
+ // increment 1), so WM_ERASEBKGND is intercepted at DefWindowProc itself.
+ // Only system-color class brushes (COLOR_x + 1) are remapped; real brush
+ // handles and anything else fall through to the original.
+-inline bool EraseWithSemanticBrush(HWND hwnd, HDC dc) {
++inline bool EraseWithSemanticBrush(colorfix::Palette palette, HWND hwnd, HDC dc) {
+     const ULONG_PTR cls = GetClassLongPtrW(hwnd, GCLP_HBRBACKGROUND);
+     if (cls == 0 || cls > static_cast<ULONG_PTR>(kSysColorCount)) return false;
+-    HBRUSH brush = SemanticBrush(static_cast<int>(cls) - 1);
++    HBRUSH brush = SemanticBrush(palette, static_cast<int>(cls) - 1);
+     if (!brush) return false;
+     RECT rc;
+     if (!GetClientRect(hwnd, &rc)) return false;
+@@ -398,15 +415,16 @@ inline LRESULT AdjustCtlColor(UINT msg, WPARAM wp, LRESULT result) {
+     CtlColorDefault d;
+     if (!CtlColorDefaultFor(msg, &d)) return result;
+     COLORFIX_PROBE_HIT(DefWindowProcCtlColor);
+-    if (!colorfix::policy::Active()) return result;
++    const colorfix::policy::State st = colorfix::policy::Current();
++    if (!st.active) return result;
+     if (result != reinterpret_cast<LRESULT>(GetSysColorBrush_Original(d.brush))) return result;
+-    HBRUSH brush = SemanticBrush(d.brush);
++    HBRUSH brush = SemanticBrush(st.palette, d.brush);
+     if (!brush) return result;
+     HDC dc = reinterpret_cast<HDC>(wp);
+     SetTextColor_Original(dc, colorfix::MapSystemColor(
+-        d.text, static_cast<COLORREF>(GetSysColor_Original(d.text))));
++        st.palette, d.text, static_cast<COLORREF>(GetSysColor_Original(d.text))));
+     SetBkColor_Original(dc, colorfix::MapSystemColor(
+-        d.bk, static_cast<COLORREF>(GetSysColor_Original(d.bk))));
++        st.palette, d.bk, static_cast<COLORREF>(GetSysColor_Original(d.bk))));
+     return reinterpret_cast<LRESULT>(brush);
+ }
+ 
+@@ -414,7 +432,8 @@ inline LRESULT WINAPI DefWindowProcW_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM
+     // Counters record interception before the policy gate, as in every hook.
+     if (msg == WM_ERASEBKGND) {
+         COLORFIX_PROBE_HIT(DefWindowProcErase);
+-        if (colorfix::policy::Active() && EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp)))
++        const colorfix::policy::State st = colorfix::policy::Current();
++        if (st.active && EraseWithSemanticBrush(st.palette, hwnd, reinterpret_cast<HDC>(wp)))
+             return 1;
+     }
+     return AdjustCtlColor(msg, wp, DefWindowProcW_Original(hwnd, msg, wp, lp));
+@@ -423,7 +442,8 @@ inline LRESULT WINAPI DefWindowProcW_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM
+ inline LRESULT WINAPI DefWindowProcA_Hook(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+     if (msg == WM_ERASEBKGND) {
+         COLORFIX_PROBE_HIT(DefWindowProcErase);
+-        if (colorfix::policy::Active() && EraseWithSemanticBrush(hwnd, reinterpret_cast<HDC>(wp)))
++        const colorfix::policy::State st = colorfix::policy::Current();
++        if (st.active && EraseWithSemanticBrush(st.palette, hwnd, reinterpret_cast<HDC>(wp)))
+             return 1;
+     }
+     return AdjustCtlColor(msg, wp, DefWindowProcA_Original(hwnd, msg, wp, lp));
+@@ -446,10 +466,12 @@ inline int WINAPI FillRect_Hook(HDC dc, const RECT* rc, HBRUSH brush) {
+     if (const FillRectTap_t tap = g_probeFillRectTap.load(std::memory_order_acquire))
+         brush = tap(dc, rc, brush);
+ #endif
+-    if (!brush || pseudo || !colorfix::policy::Active()) return FillRect_Original(dc, rc, brush);
++    if (!brush || pseudo) return FillRect_Original(dc, rc, brush);
++    const colorfix::policy::State st = colorfix::policy::Current();
++    if (!st.active) return FillRect_Original(dc, rc, brush);
+     const int index = SystemBrushIndex(brush);
+     if (index >= 0) {
+-        if (HBRUSH semantic = SemanticBrush(index)) {
++        if (HBRUSH semantic = SemanticBrush(st.palette, index)) {
+ #if defined(COLORFIX_PROBE)
+             g_fillRectSubstituted.fetch_add(1, std::memory_order_relaxed);
+ #endif
+diff --git a/hooks/colorfix_runtime.hpp b/hooks/colorfix_runtime.hpp
+index 273db54..0288110 100644
+--- a/hooks/colorfix_runtime.hpp
++++ b/hooks/colorfix_runtime.hpp
+@@ -10,12 +10,30 @@
+ // Nothing here runs in the rendering hot path; hooks only read Active().
+ namespace colorfix::runtime {
+ 
+-// Mode chosen explicitly by the host adapter (Windhawk setting, probe).
+-inline std::atomic<unsigned char> g_mode{static_cast<unsigned char>(policy::Mode::Disabled)};
++// Host configuration: mode and palette are independent dimensions, stored in
++// one atomic so the listener never refreshes with the mode of one
++// configuration and the palette of another.
++struct Configuration {
++    policy::Mode mode = policy::Mode::Disabled;
++    Palette palette = Palette::Default;
++};
++
++constexpr unsigned char EncodeConfiguration(Configuration c) noexcept {
++    return static_cast<unsigned char>(static_cast<unsigned char>(c.mode) |
++                                      (c.palette == Palette::Amoled ? 0x10u : 0u));
++}
++
++constexpr Configuration DecodeConfiguration(unsigned char raw) noexcept {
++    return Configuration{static_cast<policy::Mode>(raw & 0x0Fu),
++                         (raw & 0x10u) != 0 ? Palette::Amoled : Palette::Default};
++}
++
++inline std::atomic<unsigned char> g_config{EncodeConfiguration(Configuration{})};
+ 
+ // Telemetry for probes and logs.
+ inline std::atomic<long> g_signalsSeen{0};     // policy-relevant messages received
+ inline std::atomic<long> g_transitions{0};     // effective ON<->OFF changes
++inline std::atomic<long> g_paletteRepaints{0}; // palette changes while active
+ inline std::atomic<long> g_signalFailures{0};  // ReadWindowsSignals failures
+ 
+ inline std::atomic<HWND> g_listenerWnd{nullptr};
+@@ -37,25 +55,39 @@ struct RefreshResult {
+     bool signalsOk = false;  // ReadWindowsSignals succeeded
+     bool before = false;     // effective state before the refresh
+     bool after = false;      // effective state after the refresh
++    Palette paletteBefore = Palette::Default;
++    Palette paletteAfter = Palette::Default;
+     policy::Signals signals{};
+ };
+ 
+-// Reads the real signals and publishes. A signal failure publishes OFF: it
+-// neither keeps a previous dark state nor invents signals.
+-inline RefreshResult RefreshPolicy(policy::Mode mode) noexcept {
++// Reads the real signals and publishes activity and palette together. A
++// signal failure publishes OFF: it neither keeps a previous dark state nor
++// invents signals.
++inline RefreshResult RefreshPolicy(Configuration config) noexcept {
+     RefreshResult r;
+-    r.before = policy::Active();
++    const policy::State before = policy::Current();
++    r.before = before.active;
++    r.paletteBefore = before.palette;
+     r.signalsOk = policy::ReadWindowsSignals(&r.signals);
+     if (r.signalsOk) {
+-        policy::Publish(mode, r.signals);
++        policy::Publish(config.mode, config.palette, r.signals);
+     } else {
+-        policy::g_effectiveDark.store(false, std::memory_order_relaxed);
++        policy::PublishState(false, config.palette);
+         g_signalFailures.fetch_add(1, std::memory_order_relaxed);
+     }
+-    r.after = policy::Active();
++    const policy::State after = policy::Current();
++    r.after = after.active;
++    r.paletteAfter = after.palette;
+     return r;
+ }
+ 
++// Repaint needed: activity changed, or the palette changed while ColorFix
++// stays active (Default -> AMOLED alone does not change activity). A palette
++// change while inactive paints nothing different and needs no repaint.
++constexpr bool NeedsRepaint(const RefreshResult& r) noexcept {
++    return r.before != r.after || (r.after && r.paletteBefore != r.paletteAfter);
++}
++
+ struct EnumContext {
+     DWORD pid;
+     HWND skip;
+@@ -86,21 +118,20 @@ inline void PropagateColorChange(HWND skip) {
+     EnumWindows(PropagateToTopLevel, reinterpret_cast<LPARAM>(&ctx));
+ }
+ 
+-// Refresh, and only on an effective transition: the atomic is already
+-// updated by RefreshPolicy, then windows are invalidated.
+-inline RefreshResult ApplyRefresh(policy::Mode mode, HWND skip) {
+-    const RefreshResult r = RefreshPolicy(mode);
+-    if (r.before != r.after) {
+-        g_transitions.fetch_add(1, std::memory_order_relaxed);
+-        PropagateColorChange(skip);
+-    }
++// Refresh, and only on a visible change: the atomic is already updated by
++// RefreshPolicy, then windows are invalidated.
++inline RefreshResult ApplyRefresh(Configuration config, HWND skip) {
++    const RefreshResult r = RefreshPolicy(config);
++    if (r.before != r.after) g_transitions.fetch_add(1, std::memory_order_relaxed);
++    else if (NeedsRepaint(r)) g_paletteRepaints.fetch_add(1, std::memory_order_relaxed);
++    if (NeedsRepaint(r)) PropagateColorChange(skip);
+     return r;
+ }
+ 
+ inline LRESULT CALLBACK ListenerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+     if (IsPolicySignal(msg, wp, lp)) {
+         g_signalsSeen.fetch_add(1, std::memory_order_relaxed);
+-        ApplyRefresh(static_cast<policy::Mode>(g_mode.load(std::memory_order_relaxed)), hwnd);
++        ApplyRefresh(DecodeConfiguration(g_config.load(std::memory_order_relaxed)), hwnd);
+     }
+     if (msg == WM_DESTROY) PostQuitMessage(0);
+     return DefWindowProcW(hwnd, msg, wp, lp);
+@@ -138,8 +169,8 @@ inline DWORD WINAPI ListenerThread(LPVOID ready) {
+     return 0;
+ }
+ 
+-inline bool StartListener(policy::Mode mode) {
+-    g_mode.store(static_cast<unsigned char>(mode), std::memory_order_relaxed);
++inline bool StartListener(Configuration config) {
++    g_config.store(EncodeConfiguration(config), std::memory_order_relaxed);
+     if (g_listenerThread) return g_listenerWnd.load() != nullptr;
+     HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+     if (!ready) return false;
+@@ -158,10 +189,11 @@ inline void StopListener() {
+     }
+ }
+ 
+-// Mode change from the host (e.g. Windhawk settings): store, then refresh.
+-inline void SetMode(policy::Mode mode) {
+-    g_mode.store(static_cast<unsigned char>(mode), std::memory_order_relaxed);
+-    ApplyRefresh(mode, g_listenerWnd.load());
++// Configuration change from the host (e.g. Windhawk settings): mode and
++// palette are read once by the host and applied together. Store, then refresh.
++inline RefreshResult SetConfiguration(Configuration config) {
++    g_config.store(EncodeConfiguration(config), std::memory_order_relaxed);
++    return ApplyRefresh(config, g_listenerWnd.load());
+ }
+ 
+ } // namespace colorfix::runtime
+diff --git a/tests/core_check.cpp b/tests/core_check.cpp
+index 4bb4818..8677d76 100644
+--- a/tests/core_check.cpp
++++ b/tests/core_check.cpp
+@@ -5,22 +5,89 @@
+ 
+ using namespace colorfix;
+ 
+-constexpr bool FixedPoint(int index) {
+-    const COLORREF c = MapSystemColor(index, 0);
+-    return MapLiteralColor(c) == c;
++// ---------------------------------------------------------------- palettes
++constexpr COLORREF kBlack = RGB(0, 0, 0);
++constexpr COLORREF kWhite = RGB(255, 255, 255);
++constexpr COLORREF kText  = RGB(220, 220, 220);
++
++// Semantic colors of the active palette are fixed points of the fill path.
++constexpr bool FillFixedPoints(Palette p) {
++    for (int index : kMappedSysColors) {
++        const COLORREF c = MapSystemColor(p, index, CLR_INVALID);
++        if (MapLiteralFill(p, c) != c) return false;
++    }
++    return true;
++}
++static_assert(FillFixedPoints(Palette::Default));
++static_assert(FillFixedPoints(Palette::Amoled));
++
++// kMappedSysColors lists exactly the remapped indices of both palettes.
++constexpr bool MappedListExact(Palette p) {
++    for (int i = 0; i <= COLOR_MENUBAR; ++i) {
++        bool listed = false;
++        for (int index : kMappedSysColors) listed |= index == i;
++        const bool remapped = MapSystemColor(p, i, CLR_INVALID) != CLR_INVALID;
++        if (listed != remapped) return false;
++    }
++    return true;
+ }
++static_assert(MappedListExact(Palette::Default));
++static_assert(MappedListExact(Palette::Amoled));
+ 
+-static_assert(FixedPoint(COLOR_WINDOW));
+-static_assert(FixedPoint(COLOR_WINDOWTEXT));
+-static_assert(FixedPoint(COLOR_BTNFACE));
+-static_assert(FixedPoint(COLOR_GRAYTEXT));
+-static_assert(FixedPoint(COLOR_3DSHADOW));
+-static_assert(FixedPoint(COLOR_3DHILIGHT));
++// ------------------------------------------------------ 11a AMOLED invariants
++static_assert(MapSystemColor(Palette::Amoled, COLOR_WINDOW, kWhite) == kBlack);
++static_assert(MapSystemColor(Palette::Amoled, COLOR_BTNFACE, kWhite) == kBlack);
++static_assert(MapLiteralText(Palette::Amoled, kBlack) == kText);   // never black text
++static_assert(MapLiteralText(Palette::Default, kBlack) == kText);
++static_assert(MapLiteralFill(Palette::Amoled, kBlack) == kBlack);  // black surface kept
++static_assert(MapLiteralFill(Palette::Amoled, kWhite) == kBlack);  // white surface -> black
++static_assert(MapLiteralText(Palette::Amoled, kWhite) == kWhite);  // white text on black
++static_assert(MapLiteralText(Palette::Amoled, kText) == kText);
++static_assert(MapLiteralFill(Palette::Amoled, RGB(128, 0, 0)) == RGB(128, 0, 0));
++static_assert(MapLiteralText(Palette::Amoled, RGB(128, 0, 0)) == RGB(128, 0, 0));
++
++// Special colors pass through both paths in both palettes.
+ static_assert(IsSpecialColor(CLR_INVALID));
+ static_assert(IsSpecialColor(CLR_DEFAULT));
+ static_assert(IsPaletteEncoded(PALETTEINDEX(1)));
+ static_assert(IsPaletteEncoded(PALETTERGB(1, 2, 3)));
++static_assert(MapLiteralText(Palette::Amoled, CLR_DEFAULT) == CLR_DEFAULT);
++static_assert(MapLiteralFill(Palette::Amoled, PALETTEINDEX(1)) == PALETTEINDEX(1));
+ 
++// ------------------------------------- Default palette == pre-11a behavior
++// Frozen copy of MapLiteralColor at 44e3b32. Test oracle only.
++constexpr COLORREF LegacyMapLiteralColor(COLORREF c) {
++    if (IsSpecialColor(c)) return c;
++    const auto r = GetRValue(c), g = GetGValue(c), b = GetBValue(c);
++    const unsigned luma = (54u * r + 183u * g + 19u * b) >> 8;
++    if (c == RGB(32,32,32) || c == RGB(45,45,45) || c == RGB(37,37,37) ||
++        c == RGB(48,48,48) || c == RGB(65,65,65) || c == RGB(85,85,85) ||
++        c == RGB(145,145,145) || c == RGB(220,220,220)) return c;
++    if (luma >= 235u) return RGB(32, 32, 32);
++    if (luma <= 20u) return RGB(220, 220, 220);
++    return c;
++}
++
++constexpr bool DefaultMatchesLegacy() {
++    for (int v = 0; v < 256; ++v) {  // every grey
++        const COLORREF c = RGB(v, v, v);
++        if (MapLiteralText(Palette::Default, c) != LegacyMapLiteralColor(c)) return false;
++        if (MapLiteralFill(Palette::Default, c) != LegacyMapLiteralColor(c)) return false;
++    }
++    // 6^3 lattice incl. 0 and 255. Kept small for MSVC's default
++    // /constexpr:steps budget; the grey sweep covers both luma thresholds.
++    for (int r = 0; r < 256; r += 51)
++        for (int g = 0; g < 256; g += 51)
++            for (int b = 0; b < 256; b += 51) {
++                const COLORREF c = RGB(r, g, b);
++                if (MapLiteralText(Palette::Default, c) != LegacyMapLiteralColor(c)) return false;
++                if (MapLiteralFill(Palette::Default, c) != LegacyMapLiteralColor(c)) return false;
++            }
++    return true;
++}
++static_assert(DefaultMatchesLegacy());
++
++// ------------------------------------------------------------------ policy
+ using colorfix::policy::EffectiveDark;
+ using colorfix::policy::Mode;
+ using colorfix::policy::Signals;
+@@ -40,3 +107,15 @@ static_assert(!EffectiveDark(Mode::ForceDark,    Signals{true, true}));
+ static_assert(!EffectiveDark(Mode::FollowSystem, Signals{true, false}));
+ static_assert(!EffectiveDark(Mode::FollowSystem, Signals{true, true}));
+ 
++// Packed state round-trips: activity and palette are published together.
++using colorfix::policy::DecodeState;
++using colorfix::policy::EncodeState;
++constexpr bool StateRoundTrip(bool a, Palette p) {
++    const auto s = DecodeState(EncodeState(a, p));
++    return s.active == a && s.palette == p;
++}
++static_assert(StateRoundTrip(false, Palette::Default));
++static_assert(StateRoundTrip(true,  Palette::Default));
++static_assert(StateRoundTrip(false, Palette::Amoled));
++static_assert(StateRoundTrip(true,  Palette::Amoled));
++static_assert(EncodeState(false, Palette::Default) == 0);  // fail-safe default
+diff --git a/tests/probe/probe_hooks.cpp b/tests/probe/probe_hooks.cpp
+index d698fbb..5eaa20c 100644
+--- a/tests/probe/probe_hooks.cpp
++++ b/tests/probe/probe_hooks.cpp
+@@ -747,11 +747,15 @@ int main(int argc, char** argv) {
+     // Values needed for expectations, read before any hook is enabled.
+     const COLORREF baseSysWindow = GetSysColor(COLOR_WINDOW);
+     const HBRUSH baseSysBrush = GetSysColorBrush(COLOR_WINDOW);
+-    const COLORREF expWindow = colorfix::MapSystemColor(COLOR_WINDOW, baseSysWindow);
+-    const COLORREF expLiteral = colorfix::MapLiteralColor(kWhite);
+-    const COLORREF exp3dFace = colorfix::MapSystemColor(COLOR_3DFACE, GetSysColor(COLOR_3DFACE));
++    // The probe runs the Default palette (11a keeps its values unchanged).
++    constexpr colorfix::Palette kPal = colorfix::Palette::Default;
++    const COLORREF expWindow = colorfix::MapSystemColor(kPal, COLOR_WINDOW, baseSysWindow);
++    const COLORREF expLiteralText = colorfix::MapLiteralText(kPal, kWhite);
++    const COLORREF expLiteral = colorfix::MapLiteralFill(kPal, kWhite);
++    const COLORREF exp3dFace =
++        colorfix::MapSystemColor(kPal, COLOR_3DFACE, GetSysColor(COLOR_3DFACE));
+     const COLORREF expWindowText =
+-        colorfix::MapSystemColor(COLOR_WINDOWTEXT, GetSysColor(COLOR_WINDOWTEXT));
++        colorfix::MapSystemColor(kPal, COLOR_WINDOWTEXT, GetSysColor(COLOR_WINDOWTEXT));
+     std::printf("expect: COLOR_WINDOW ");
+     PrintRgb(baseSysWindow); std::printf("->"); PrintRgb(expWindow);
+     std::printf(", literal white ");
+@@ -761,7 +765,7 @@ int main(int argc, char** argv) {
+     // Runtime policy: explicit ForceDark with real Windows signals keeps
+     // increments 1-7 comparable. A real signal read failure invalidates the run.
+     const colorfix::runtime::RefreshResult initial =
+-        colorfix::runtime::RefreshPolicy(colorfix::policy::Mode::ForceDark);
++        colorfix::runtime::RefreshPolicy({colorfix::policy::Mode::ForceDark, kPal});
+     std::printf("runtime: initial mode=ForceDark signals=%s hc=%d light=%d active=%d\n",
+                 initial.signalsOk ? "OK" : "FAILED", initial.signals.highContrast ? 1 : 0,
+                 initial.signals.appsUseLightTheme ? 1 : 0, initial.after ? 1 : 0);
+@@ -868,7 +872,7 @@ int main(int argc, char** argv) {
+     });
+     run("SetTextColor", HookId::SetTextColor, [&](Autotest& t) {
+         SetTextColor(testDc, kWhite);
+-        t.expected = expLiteral;
++        t.expected = expLiteralText;
+         t.observed = GetTextColor(testDc);
+         t.valueOk = t.observed == t.expected;
+     });
+@@ -1039,7 +1043,7 @@ int main(int argc, char** argv) {
+     const HBRUSH sysHighlight = cfh::GetSysColorBrush_Original(COLOR_HIGHLIGHT);
+     std::printf("detail: FillRect.inputs face=%p highlight=%p unmapped-role=%d\n",
+                 static_cast<void*>(sysFace), static_cast<void*>(sysHighlight),
+-                colorfix::MapSystemColor(COLOR_HIGHLIGHT, origHighlight) == origHighlight ? 1 : 0);
++                colorfix::MapSystemColor(colorfix::Palette::Default, COLOR_HIGHLIGHT, origHighlight) == origHighlight ? 1 : 0);
+     struct FillCase {
+         const char* name;
+         HBRUSH brush;
+@@ -1063,7 +1067,7 @@ int main(int argc, char** argv) {
+         {"FillRect.unmapped",  sysHighlight, sigOn,         origHighlight, 0, 0},
+         {"FillRect.stock", static_cast<HBRUSH>(cfh::GetStockObject_Original(WHITE_BRUSH)),
+                                              sigOn,         kWhite,        0, 0},
+-        {"FillRect.semantic",  cfh::SemanticBrush(COLOR_BTNFACE),
++        {"FillRect.semantic",  cfh::SemanticBrush(colorfix::Palette::Default, COLOR_BTNFACE),
+                                              sigOn,         exp3dFace,     0, 0},
+         {"FillRect.pseudo", reinterpret_cast<HBRUSH>(static_cast<INT_PTR>(COLOR_BTNFACE + 1)),
+                                              sigOn,         CLR_INVALID,   0, 1},
+@@ -1072,7 +1076,7 @@ int main(int argc, char** argv) {
+     for (const auto& fc : fillCases) {
+         run(fc.name, HookId::FillRect, [&](Autotest& t) {
+             const bool off = std::strcmp(fc.name, "FillRect.sys-off") == 0;
+-            cfp9::Publish(off ? cfp9::Mode::Disabled : cfp9::Mode::ForceDark, fc.signals);
++            cfp9::Publish(off ? cfp9::Mode::Disabled : cfp9::Mode::ForceDark, colorfix::Palette::Default, fc.signals);
+             const long sub0 = cfh::g_fillRectSubstituted.load();
+             const long ps0 = cfh::g_fillRectPseudo.load();
+             t.expected = fc.expected != CLR_INVALID ? fc.expected : fillCenter(fc.brush, true);
+@@ -1085,7 +1089,7 @@ int main(int argc, char** argv) {
+                 std::printf("detail: %s substitutions=%ld pseudo=%ld\n", fc.name, sub, ps);
+         });
+     }
+-    cfp9::Publish(cfp9::Mode::ForceDark, initial.signals);  // back to the run's state
++    cfp9::Publish(cfp9::Mode::ForceDark, colorfix::Palette::Default, initial.signals);  // back to the run's state
+     DeleteObject(sameColor);
+ 
+     // Identity cache: filled from the exports before any hook existed, it must
+@@ -1215,7 +1219,7 @@ int main(int argc, char** argv) {
+     bool policyOk = true;
+     for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); ++i) {
+         const PolicyStep& st = steps[i];
+-        cfp::Publish(st.mode, st.signals);
++        cfp::Publish(st.mode, colorfix::Palette::Default, st.signals);
+         const bool active = cfp::Active();
+         const WindowShot now[3] = {Shoot(winE), Shoot(winK), Shoot(winC)};
+         const WindowShot* base[3] = {&baseE, &baseK, &baseC};
+@@ -1274,7 +1278,7 @@ int main(int argc, char** argv) {
+                         same ? "PASS" : "FAIL");
+         }
+     }
+-    cfp::Publish(cfp::Mode::ForceDark, {});
++    cfp::Publish(cfp::Mode::ForceDark, colorfix::Palette::Default, {});
+ 
+     // ------------------------------------------ Phase 9a: button face causality
+     // Policy ON, product hooks live. Candidates are intervened one at a time,
+@@ -1576,7 +1580,7 @@ int main(int argc, char** argv) {
+                     wr.left, wr.top, wr.right, wr.bottom, mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right, mi.rcMonitor.bottom, uInside ? 1 : 0);
+     }
+-    cfp::Publish(cfp::Mode::ForceDark, {});
++    cfp::Publish(cfp::Mode::ForceDark, colorfix::Palette::Default, {});
+     // Warm-up: in run 221 the first capture of U gave a black button interior
+     // (themed=000000) in all six processes while the themed draws were
+     // observed. The first capture is kept as a reported finding and is not
+@@ -1674,7 +1678,7 @@ int main(int argc, char** argv) {
+             Pump(100);
+         }
+         for (int on = 0; on < 2; ++on) {
+-            cfp::Publish(on ? cfp::Mode::ForceDark : cfp::Mode::Disabled, {});
++            cfp::Publish(on ? cfp::Mode::ForceDark : cfp::Mode::Disabled, colorfix::Palette::Default, {});
+             TextStats ts[4][2];
+             int agree = 0;
+             for (int sIdx = 0; sIdx < 4; ++sIdx) {
+@@ -1719,7 +1723,7 @@ int main(int argc, char** argv) {
+             Pump(100);
+         }
+     }
+-    cfp::Publish(cfp::Mode::ForceDark, {});
++    cfp::Publish(cfp::Mode::ForceDark, colorfix::Palette::Default, {});
+     std::printf("buttontext: product push N/P=000000x582 D=838383 %s\n",
+                 productTextGate ? "PASS" : "HOOK_BEHAVIOR_FAILURE");
+ 
+@@ -2185,7 +2189,8 @@ int main(int argc, char** argv) {
+     DWORD origSize = sizeof(origLight);
+     const LSTATUS origStatus = RegGetValueW(HKEY_CURRENT_USER, kPersonalize, L"AppsUseLightTheme",
+                                             RRF_RT_REG_DWORD, nullptr, &origLight, &origSize);
+-    const bool listenerOk = cfr::StartListener(cfp::Mode::FollowSystem);
++    const bool listenerOk =
++        cfr::StartListener({cfp::Mode::FollowSystem, colorfix::Palette::Default});
+     if (!listenerOk) infraOk = false;
+     std::printf("runtime: listener %s\n", listenerOk ? "STARTED" : "INFRASTRUCTURE_FAILURE");
+ 
+diff --git a/windhawk/colorfix.wh.template.cpp b/windhawk/colorfix.wh.template.cpp
+index 4cf997f..e5a3cad 100644
+--- a/windhawk/colorfix.wh.template.cpp
++++ b/windhawk/colorfix.wh.template.cpp
+@@ -2,7 +2,7 @@
+ // @id              colorfix
+ // @name            ColorFix
+ // @description     Phase 1 dark color compatibility for classic Win32 applications
+-// @version         0.1.0
++// @version         0.2.0
+ // @author          ReinierTutoriales
+ // @include         ColorFixTest.exe
+ // @architecture    x86-64
+@@ -20,6 +20,12 @@
+   - followsystem: Follow the Windows app theme
+   - forcedark: Always dark
+   - disabled: Disabled
++- palette: default
++  $name: Palette
++  $description: Dark colors used while ColorFix is active.
++  $options:
++  - default: Default dark (#202020 surfaces)
++  - amoled: AMOLED black (#000000 surfaces)
+ */
+ // ==/WindhawkModSettings==
+ 
+@@ -51,13 +57,30 @@ static colorfix::policy::Mode ReadModeSetting() {
+     return mode;
+ }
+ 
++// An unrecognized palette value is treated as Default: the pre-11a colors.
++static colorfix::Palette ReadPaletteSetting() {
++    colorfix::Palette palette = colorfix::Palette::Default;
++    if (PCWSTR value = Wh_GetStringSetting(L"palette")) {
++        if (lstrcmpiW(value, L"amoled") == 0) palette = colorfix::Palette::Amoled;
++        else if (lstrcmpiW(value, L"default") != 0)
++            Wh_Log(L"ColorFix: unknown palette setting, using default");
++        Wh_FreeStringSetting(value);
++    }
++    return palette;
++}
++
++// Mode and palette are read once, together, and applied as one configuration.
++static colorfix::runtime::Configuration ReadConfiguration() {
++    return colorfix::runtime::Configuration{ReadModeSetting(), ReadPaletteSetting()};
++}
++
+ BOOL Wh_ModInit() {
+-    const colorfix::policy::Mode mode = ReadModeSetting();
++    const colorfix::runtime::Configuration config = ReadConfiguration();
+     // Publish before any hook is applied: nothing turns dark unless the
+     // explicit mode and the real Windows signals say so.
+-    if (!colorfix::runtime::RefreshPolicy(mode).signalsOk)
++    if (!colorfix::runtime::RefreshPolicy(config).signalsOk)
+         Wh_Log(L"ColorFix: reading Windows theme signals failed; staying inactive");
+-    if (!colorfix::runtime::StartListener(mode))
++    if (!colorfix::runtime::StartListener(config))
+         Wh_Log(L"ColorFix: policy listener failed; theme changes need a restart");
+     // Hooks queued during Wh_ModInit are applied by Windhawk after it returns.
+     // Wh_ApplyHookOperations is only for hooks queued after initialization.
+@@ -70,7 +93,7 @@ BOOL Wh_ModInit() {
+ }
+ 
+ void Wh_ModSettingsChanged() {
+-    colorfix::runtime::SetMode(ReadModeSetting());
++    colorfix::runtime::SetConfiguration(ReadConfiguration());
+ }
+ 
+ void Wh_ModUninit() {
+-- 
+2.43.0
+
