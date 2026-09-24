@@ -36,6 +36,9 @@ struct Event {
 struct ThemeMap {
     HTHEME theme = nullptr;
     wchar_t klass[48]{};
+    LONG refs = 0;
+    LONG opens = 0;
+    LONG closes = 0;
 };
 
 inline constexpr int kMaxThemes = 64;
@@ -105,6 +108,8 @@ inline void RecordTheme(HTHEME theme, LPCWSTR klass) noexcept {
     for (LONG i = n - 1; i >= 0; --i)
         if (g_themes[i].theme == theme) {
             CopyClass(g_themes[i].klass, _countof(g_themes[i].klass), klass);
+            InterlockedIncrement(&g_themes[i].refs);
+            InterlockedIncrement(&g_themes[i].opens);
             return;
         }
     LONG slot = InterlockedIncrement(&g_themeCount) - 1;
@@ -114,6 +119,29 @@ inline void RecordTheme(HTHEME theme, LPCWSTR klass) noexcept {
     }
     g_themes[slot].theme = theme;
     CopyClass(g_themes[slot].klass, _countof(g_themes[slot].klass), klass);
+    g_themes[slot].refs = 1;
+    g_themes[slot].opens = 1;
+    g_themes[slot].closes = 0;
+}
+
+inline bool ReleaseTheme(HTHEME theme) noexcept {
+    const LONG n = g_themeCount < kMaxThemes ? g_themeCount : kMaxThemes;
+    for (LONG i = n - 1; i >= 0; --i)
+        if (g_themes[i].theme == theme) {
+            const LONG refs = g_themes[i].refs;
+            if (refs <= 0) {
+                g_themes[i].theme = nullptr;
+                g_themes[i].klass[0] = L'\0';
+                return false;
+            }
+            InterlockedIncrement(&g_themes[i].closes);
+            if (InterlockedDecrement(&g_themes[i].refs) == 0) {
+                g_themes[i].theme = nullptr;
+                g_themes[i].klass[0] = L'\0';
+            }
+            return true;
+        }
+    return false;
 }
 
 inline void ForgetTheme(HTHEME theme) noexcept {
@@ -122,6 +150,7 @@ inline void ForgetTheme(HTHEME theme) noexcept {
         if (g_themes[i].theme == theme) {
             g_themes[i].theme = nullptr;
             g_themes[i].klass[0] = L'\0';
+            g_themes[i].refs = 0;
             return;
         }
 }
@@ -159,7 +188,7 @@ inline HRESULT WINAPI CloseThemeData_Hook(HTHEME theme) {
     const HRESULT hr = g_closeOrig(theme);
     if (SUCCEEDED(hr)) {
         if (!g_paused) InterlockedIncrement(&g_close);
-        ForgetTheme(theme);
+        ReleaseTheme(theme);
     }
     return hr;
 }
