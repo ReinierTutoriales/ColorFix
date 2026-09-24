@@ -85,6 +85,6 @@ jobs:
       - name: Windhawk mod syntax check
         shell: cmd
         run: >
-          cl /nologo /std:c++20 /EHsc /Zs /W4 /DUNICODE /D_UNICODE
+          cl /nologo /std:c++20 /Zc:preprocessor /EHsc /Zs /W4 /DUNICODE /D_UNICODE
           /FI"%GITHUB_WORKSPACE%\tests\windhawk\windhawk_api_stub.h"
           generated\colorfix.wh.cpp
