@@ -48,3 +48,22 @@ static_assert(colorfix::hooks::SingleThemeClass(L"Button") != nullptr);
 static_assert(colorfix::hooks::SingleThemeClass(L"Explorer::Button") != nullptr);
 static_assert(colorfix::hooks::SingleThemeClass(L"Button;Edit") == nullptr);
 static_assert(colorfix::hooks::SingleThemeClass(nullptr) == nullptr);
+
+bool ThemeRefcountAutotest() {
+    using namespace colorfix::hooks;
+    const HTHEME h = reinterpret_cast<HTHEME>(static_cast<UINT_PTR>(0xCF01));
+    const HTHEME unknown = reinterpret_cast<HTHEME>(static_cast<UINT_PTR>(0xCF02));
+    if (!RememberTheme(h, L"Button")) return false;
+    if (!RememberTheme(h, L"Button")) return false;
+    if (!KnownButtonTheme(h)) return false;
+    if (!ReleaseTheme(h) || !KnownButtonTheme(h)) return false;
+    if (!ReleaseTheme(h) || KnownButtonTheme(h)) return false;
+    if (ReleaseTheme(unknown) || KnownButtonTheme(unknown)) return false;
+    return true;
+}
+
+struct ThemeRefcountCheck {
+    ThemeRefcountCheck() {
+        if (!ThemeRefcountAutotest()) ExitProcess(2);
+    }
+} g_themeRefcountCheck;
