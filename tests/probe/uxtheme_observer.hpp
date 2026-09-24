@@ -59,19 +59,26 @@ inline volatile LONG g_paused = 0;
 using DrawIntercept_t = bool (*)(const wchar_t* klass, HDC dc, int part, int state,
                                  const RECT* rect);
 inline DrawIntercept_t g_drawIntercept = nullptr;
+inline thread_local int t_drawThemeTextDepth = 0;
+inline volatile LONG g_text = 0;
+inline volatile LONG g_textEx = 0;
 
 using OpenThemeData_t = HTHEME (WINAPI*)(HWND, LPCWSTR);
 using OpenThemeDataForDpi_t = HTHEME (WINAPI*)(HWND, LPCWSTR, UINT);
 using DrawThemeBackground_t = HRESULT (WINAPI*)(HTHEME, HDC, int, int, const RECT*, const RECT*);
 using DrawThemeBackgroundEx_t = HRESULT (WINAPI*)(HTHEME, HDC, int, int, const RECT*, const DTBGOPTS*);
 using GetThemeColor_t = HRESULT (WINAPI*)(HTHEME, int, int, int, COLORREF*);
+using DrawThemeText_t = HRESULT (WINAPI*)(HTHEME, HDC, int, int, LPCWSTR, int, DWORD, DWORD, const RECT*);
+using DrawThemeTextEx_t = HRESULT (WINAPI*)(HTHEME, HDC, int, int, LPCWSTR, int, DWORD, LPRECT, const DTTOPTS*);
 
 inline OpenThemeData_t g_openOrig = nullptr;
 inline OpenThemeDataForDpi_t g_openDpiOrig = nullptr;
 inline DrawThemeBackground_t g_drawOrig = nullptr;
 inline DrawThemeBackgroundEx_t g_drawExOrig = nullptr;
 inline GetThemeColor_t g_colorOrig = nullptr;
-inline void* g_targets[5]{};
+inline DrawThemeText_t g_textOrig = nullptr;
+inline DrawThemeTextEx_t g_textExOrig = nullptr;
+inline void* g_targets[7]{};
 
 inline void CopyClass(wchar_t* dst, size_t n, LPCWSTR src) noexcept {
     if (!dst || n == 0) return;
@@ -208,6 +215,22 @@ inline HRESULT WINAPI GetThemeColor_Hook(HTHEME theme, int part, int state, int 
     return hr;
 }
 
+inline HRESULT WINAPI DrawThemeText_Hook(HTHEME theme, HDC dc, int part, int state, LPCWSTR text, int count, DWORD flags, DWORD flags2, const RECT* rect) {
+    ++t_drawThemeTextDepth;
+    const HRESULT hr = g_textOrig(theme, dc, part, state, text, count, flags, flags2, rect);
+    --t_drawThemeTextDepth;
+    InterlockedIncrement(&g_text);
+    return hr;
+}
+
+inline HRESULT WINAPI DrawThemeTextEx_Hook(HTHEME theme, HDC dc, int part, int state, LPCWSTR text, int count, DWORD flags, LPRECT rect, const DTTOPTS* opts) {
+    ++t_drawThemeTextDepth;
+    const HRESULT hr = g_textExOrig(theme, dc, part, state, text, count, flags, rect, opts);
+    --t_drawThemeTextDepth;
+    InterlockedIncrement(&g_textEx);
+    return hr;
+}
+
 inline bool CreateAndEnable(HMODULE ux, const char* name, void* hook, void** original,
                             void** targetOut) {
     void* target = reinterpret_cast<void*>(GetProcAddress(ux, name));
@@ -246,7 +269,11 @@ inline bool Install(HWND v, HWND l) {
            CreateAndEnable(ux, "DrawThemeBackgroundEx", reinterpret_cast<void*>(&DrawThemeBackgroundEx_Hook),
                            reinterpret_cast<void**>(&g_drawExOrig), &g_targets[3]) &&
            CreateAndEnable(ux, "GetThemeColor", reinterpret_cast<void*>(&GetThemeColor_Hook),
-                           reinterpret_cast<void**>(&g_colorOrig), &g_targets[4]);
+                           reinterpret_cast<void**>(&g_colorOrig), &g_targets[4]) &&
+           CreateAndEnable(ux, "DrawThemeText", reinterpret_cast<void*>(&DrawThemeText_Hook),
+                           reinterpret_cast<void**>(&g_textOrig), &g_targets[5]) &&
+           CreateAndEnable(ux, "DrawThemeTextEx", reinterpret_cast<void*>(&DrawThemeTextEx_Hook),
+                           reinterpret_cast<void**>(&g_textExOrig), &g_targets[6]);
 }
 
 inline Stats GetStats() noexcept {
