@@ -317,12 +317,55 @@ Evidence established by the current probes:
   - Probe architecture: the product owns `user32!FillRect`; the button-face
     observer is a probe-only tap inside the product hook (compiled out of the
     mod), so no target has two detours.
+- Button text and scoped theme opt-out (probe increment 9c, window U, runs
+  227 push and 228 pull request, both load orders, x64/x86/ARM64;
+  measurement only, no product change):
+  - Opt-out scope: `SetWindowTheme(hwnd, L"", L"")` on the v6 push button
+    alone takes its face from themed `FDFDFD` to `2D2D2D` COVERED, and
+    `SetWindowTheme(hwnd, NULL, NULL)` restores it exactly. The themed Static
+    and Edit siblings stay pixel-identical during and after. The 82x72
+    `Button`/`BP_PUSHBUTTON` draws stop while opted out (4, 0, 5) and the
+    `Edit`/`EP_BACKGROUND` draws continue (3, 3, 3). In the measured
+    configuration the opt-out affects only the window it is applied to.
+  - Text method: bold 28 px non-antialiased "MM". The glyph covers 582
+    pixels in every configuration, so the text color is identified by that
+    count, not by frequency rank. Contrast is the WCAG 2 ratio, reported as a
+    finding; no threshold is a requirement.
+  - Policy OFF: black text on `F0F0F0` (classic and opted out, ratio 18.4)
+    and on the themed faces (`FDFDFD` 20.6, pressed `CCE4F7` 16.0).
+  - Policy ON, themed v6 button: the face is unchanged (`FDFDFD`, pressed
+    `CCE4F7`) while the text becomes `DCDCDC`, ratio 1.3 (pressed 1.0).
+    ColorFix currently makes themed push-button text illegible. `DCDCDC` is
+    `MapLiteralColor` of black; attributing it to the `SetTextColor` hook is
+    an inference, not a measurement.
+  - Policy ON, classic button: face `2D2D2D` and text `DCDCDC`, drawn over a
+    `202020` block of 1470 pixels around the text (text to block 11.9):
+    legible, with a visible artifact. `202020` is `MapLiteralColor(F0F0F0)`;
+    an opaque text background mapped literally instead of semantically is
+    inferred.
+  - Policy ON, opted-out v6 button: face `2D2D2D`, text `DCDCDC`, ratio 10.0,
+    no block.
+  - DISABLED and DEFAULTED text varies between load orders (up to six
+    colors); no conclusion is drawn from them.
+  - The U classic button face matched window C (OFF `F0F0F0`, ON `2D2D2D`),
+    as required for the classic measurement to stand for C's class.
+  - Capture reliability: at (780,100)-(1100,300) U extended past the
+    1024x768 runner monitor, and its captures were intermittently black,
+    sentinel included, in runs 221 to 224. Moved on top and fully inside the
+    monitor for this phase only, and hidden afterwards, U gave valid first
+    captures and needed no retries in all twelve processes of runs 227 and
+    228. This is a correlation, not a proven cause; a bounded sentinel retry
+    remains as a detector.
 
 These results were reproduced by CI on x64, x86, and native ARM64. Increment 3 was squash-merged to `main` as `5cd97a1`; main CI run 48 was reported green on all three architectures.
 
 Increment 9b evidence: runs 213 (measurement) and 215 (product hook, all
 gates PASS, `exit=0` in all six processes). No notice-length warning was
-emitted, so no annotation was truncated.
+emitted, so no annotation was truncated. Increment 9b was squash-merged to
+`main` as `61ca15f`; main CI run 218 passed on all three architectures.
+
+Increment 9c evidence: runs 227 (push) and 228 (pull request), `exit=0` in
+all six processes of each, with the increment 9b gates unchanged.
 
 ## 10. Requirements for future rendering mechanisms
 
