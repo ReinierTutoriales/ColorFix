@@ -498,6 +498,35 @@ inside Windhawk; keep that distinction explicit.
 - Preserve the distinction between documented API behavior, measured ColorFix
   behavior, and implementation assumptions.
 
+## Increment 11a: palettes and literal-color roles
+
+Decided in increment 11a (design; runtime evidence pending in CI and in the
+Windhawk integration test):
+
+- Mode (Disabled / ForceDark / FollowSystem) and palette (Default / AMOLED)
+  are independent dimensions. The host reads both once and applies them as one
+  configuration (`runtime::SetConfiguration`).
+- Activity and palette are published in one atomic byte
+  (`policy::g_state`). Hooks load it once per call and use that copy only.
+- Repaint happens when activity changes, and also when the palette changes
+  while ColorFix stays active.
+- Literal colors are mapped by role. `MapLiteralText` (SetTextColor) and
+  `MapLiteralFill` (SetBkColor, CreateSolidBrush) replace the shared
+  `MapLiteralColor`, which no longer exists. Reason: with AMOLED, #000000 is
+  both the semantic surface color and the most common literal text color.
+- AMOLED invariants (compile-time, tests/core_check.cpp): text #000000 ->
+  #DCDCDC; fill #000000 -> #000000; fill #FFFFFF -> #000000; every semantic
+  color of the active palette is a fixed point of the fill path.
+- The 9f exception keeps precedence over `MapLiteralText` in every palette.
+- The Default palette is unchanged: text and fill mapping equal the pre-11a
+  mapper for every grey and a 6x6x6 RGB lattice (frozen oracle in
+  tests/core_check.cpp). CI evidence from 9b-9f therefore still applies.
+- System brushes: one never-deleted bank per palette. The palette is captured
+  before selecting/creating a brush, so a concurrent switch cannot publish a
+  brush of one palette in the other palette's slot.
+- Not assumed: that every AMOLED role is visible in real applications. That
+  depends on which paint paths reach the hooks and must be measured.
+
 ## 12. Maintenance rule
 
 Update this document when an increment:

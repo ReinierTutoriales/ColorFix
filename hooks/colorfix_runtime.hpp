@@ -10,12 +10,30 @@
 // Nothing here runs in the rendering hot path; hooks only read Active().
 namespace colorfix::runtime {
 
-// Mode chosen explicitly by the host adapter (Windhawk setting, probe).
-inline std::atomic<unsigned char> g_mode{static_cast<unsigned char>(policy::Mode::Disabled)};
+// Host configuration: mode and palette are independent dimensions, stored in
+// one atomic so the listener never refreshes with the mode of one
+// configuration and the palette of another.
+struct Configuration {
+    policy::Mode mode = policy::Mode::Disabled;
+    Palette palette = Palette::Default;
+};
+
+constexpr unsigned char EncodeConfiguration(Configuration c) noexcept {
+    return static_cast<unsigned char>(static_cast<unsigned char>(c.mode) |
+                                      (c.palette == Palette::Amoled ? 0x10u : 0u));
+}
+
+constexpr Configuration DecodeConfiguration(unsigned char raw) noexcept {
+    return Configuration{static_cast<policy::Mode>(raw & 0x0Fu),
+                         (raw & 0x10u) != 0 ? Palette::Amoled : Palette::Default};
+}
+
+inline std::atomic<unsigned char> g_config{EncodeConfiguration(Configuration{})};
 
 // Telemetry for probes and logs.
 inline std::atomic<long> g_signalsSeen{0};     // policy-relevant messages received
 inline std::atomic<long> g_transitions{0};     // effective ON<->OFF changes
+inline std::atomic<long> g_paletteRepaints{0}; // palette changes while active
 inline std::atomic<long> g_signalFailures{0};  // ReadWindowsSignals failures
 
 inline std::atomic<HWND> g_listenerWnd{nullptr};
@@ -37,23 +55,37 @@ struct RefreshResult {
     bool signalsOk = false;  // ReadWindowsSignals succeeded
     bool before = false;     // effective state before the refresh
     bool after = false;      // effective state after the refresh
+    Palette paletteBefore = Palette::Default;
+    Palette paletteAfter = Palette::Default;
     policy::Signals signals{};
 };
 
-// Reads the real signals and publishes. A signal failure publishes OFF: it
-// neither keeps a previous dark state nor invents signals.
-inline RefreshResult RefreshPolicy(policy::Mode mode) noexcept {
+// Reads the real signals and publishes activity and palette together. A
+// signal failure publishes OFF: it neither keeps a previous dark state nor
+// invents signals.
+inline RefreshResult RefreshPolicy(Configuration config) noexcept {
     RefreshResult r;
-    r.before = policy::Active();
+    const policy::State before = policy::Current();
+    r.before = before.active;
+    r.paletteBefore = before.palette;
     r.signalsOk = policy::ReadWindowsSignals(&r.signals);
     if (r.signalsOk) {
-        policy::Publish(mode, r.signals);
+        policy::Publish(config.mode, config.palette, r.signals);
     } else {
-        policy::g_effectiveDark.store(false, std::memory_order_relaxed);
+        policy::PublishState(false, config.palette);
         g_signalFailures.fetch_add(1, std::memory_order_relaxed);
     }
-    r.after = policy::Active();
+    const policy::State after = policy::Current();
+    r.after = after.active;
+    r.paletteAfter = after.palette;
     return r;
+}
+
+// Repaint needed: activity changed, or the palette changed while ColorFix
+// stays active (Default -> AMOLED alone does not change activity). A palette
+// change while inactive paints nothing different and needs no repaint.
+constexpr bool NeedsRepaint(const RefreshResult& r) noexcept {
+    return r.before != r.after || (r.after && r.paletteBefore != r.paletteAfter);
 }
 
 struct EnumContext {
@@ -86,21 +118,20 @@ inline void PropagateColorChange(HWND skip) {
     EnumWindows(PropagateToTopLevel, reinterpret_cast<LPARAM>(&ctx));
 }
 
-// Refresh, and only on an effective transition: the atomic is already
-// updated by RefreshPolicy, then windows are invalidated.
-inline RefreshResult ApplyRefresh(policy::Mode mode, HWND skip) {
-    const RefreshResult r = RefreshPolicy(mode);
-    if (r.before != r.after) {
-        g_transitions.fetch_add(1, std::memory_order_relaxed);
-        PropagateColorChange(skip);
-    }
+// Refresh, and only on a visible change: the atomic is already updated by
+// RefreshPolicy, then windows are invalidated.
+inline RefreshResult ApplyRefresh(Configuration config, HWND skip) {
+    const RefreshResult r = RefreshPolicy(config);
+    if (r.before != r.after) g_transitions.fetch_add(1, std::memory_order_relaxed);
+    else if (NeedsRepaint(r)) g_paletteRepaints.fetch_add(1, std::memory_order_relaxed);
+    if (NeedsRepaint(r)) PropagateColorChange(skip);
     return r;
 }
 
 inline LRESULT CALLBACK ListenerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (IsPolicySignal(msg, wp, lp)) {
         g_signalsSeen.fetch_add(1, std::memory_order_relaxed);
-        ApplyRefresh(static_cast<policy::Mode>(g_mode.load(std::memory_order_relaxed)), hwnd);
+        ApplyRefresh(DecodeConfiguration(g_config.load(std::memory_order_relaxed)), hwnd);
     }
     if (msg == WM_DESTROY) PostQuitMessage(0);
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -138,8 +169,8 @@ inline DWORD WINAPI ListenerThread(LPVOID ready) {
     return 0;
 }
 
-inline bool StartListener(policy::Mode mode) {
-    g_mode.store(static_cast<unsigned char>(mode), std::memory_order_relaxed);
+inline bool StartListener(Configuration config) {
+    g_config.store(EncodeConfiguration(config), std::memory_order_relaxed);
     if (g_listenerThread) return g_listenerWnd.load() != nullptr;
     HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!ready) return false;
@@ -158,10 +189,11 @@ inline void StopListener() {
     }
 }
 
-// Mode change from the host (e.g. Windhawk settings): store, then refresh.
-inline void SetMode(policy::Mode mode) {
-    g_mode.store(static_cast<unsigned char>(mode), std::memory_order_relaxed);
-    ApplyRefresh(mode, g_listenerWnd.load());
+// Configuration change from the host (e.g. Windhawk settings): mode and
+// palette are read once by the host and applied together. Store, then refresh.
+inline RefreshResult SetConfiguration(Configuration config) {
+    g_config.store(EncodeConfiguration(config), std::memory_order_relaxed);
+    return ApplyRefresh(config, g_listenerWnd.load());
 }
 
 } // namespace colorfix::runtime
