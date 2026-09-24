@@ -1462,6 +1462,9 @@ int main(int argc, char** argv) {
     // and contrast are findings.
     std::printf("\n[button text 9c] U: scoped theme opt-out and text colors\n");
     bool uInfra = true, uBehavior = true;
+    // Run 221 reported INFRASTRUCTURE_FAILURE without naming the condition:
+    // each infrastructure condition is now counted separately.
+    long uMagentaFail = 0, uHrFail = 0, uTextShort = 0, uEquivFail = 0;
     const HWND uButton = GetDlgItem(winU, kButtonId);
     const HWND uClassic = GetDlgItem(winU, kClassicId);
     if (!uButton || !uClassic) uInfra = false;
@@ -1474,11 +1477,31 @@ int main(int argc, char** argv) {
             COLORREF c = CLR_INVALID;
             if (s.mode[m].px.empty() || !SurfaceColor(s.mode[m], kMagentaRect, &c) ||
                 c != kMagenta)
-                uInfra = false;
+                ++uMagentaFail;
         }
         return s;
     };
     cfp::Publish(cfp::Mode::ForceDark, {});
+    // Warm-up: in run 221 the first capture of U gave a black button interior
+    // (themed=000000) in all six processes while the themed draws were
+    // observed. The first capture is kept as a reported finding and is not
+    // part of the gates or of the magenta infrastructure count.
+    {
+        RedrawWindow(uButton, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+        const WindowShot warm = Shoot(winU);
+        std::printf("buttontext: detail first-capture button=");
+        PrintRgb(MeasureText(warm.mode[0], kUButton).bg);
+        std::printf("/");
+        PrintRgb(MeasureText(warm.mode[1], kUButton).bg);
+        for (int m = 0; m < 2; ++m) {
+            COLORREF c = CLR_INVALID;
+            const bool ok = !warm.mode[m].px.empty() &&
+                            SurfaceColor(warm.mode[m], kMagentaRect, &c) && c == kMagenta;
+            std::printf(" magenta%d=%s", m, ok ? "VALID" : "INVALID");
+        }
+        std::printf("\n");
+    }
     const LONG uEv0 = uxo::g_eventCount;
     const WindowShot uThemed = uShoot(uButton);
     const LONG uEvOff = uxo::g_eventCount;
@@ -1490,7 +1513,7 @@ int main(int argc, char** argv) {
     Pump(100);
     const WindowShot uRestored = uShoot(uButton);
     const LONG uEvEnd = uxo::g_eventCount;
-    if (FAILED(uOffHr) || FAILED(uRestoreHr)) uInfra = false;
+    if (FAILED(uOffHr) || FAILED(uRestoreHr)) ++uHrFail;
 
     bool g1 = true, g2 = true;
     for (int m = 0; m < 2; ++m) {
@@ -1551,7 +1574,7 @@ int main(int argc, char** argv) {
     for (const auto& tc : textConfigs) {
         if (!tc.button) continue;
         if (tc.optOut) {
-            if (FAILED(ApplyWindowTheme(tc.button, L"", L""))) uInfra = false;
+            if (FAILED(ApplyWindowTheme(tc.button, L"", L""))) ++uHrFail;
             Pump(100);
         }
         for (int on = 0; on < 2; ++on) {
@@ -1565,14 +1588,14 @@ int main(int argc, char** argv) {
                 for (int m = 0; m < 2; ++m) ts[sIdx][m] = MeasureText(shot.mode[m], tc.rect);
                 uApplyState(tc.button, sIdx, false);
                 Pump(50);
-                if (ts[sIdx][0].t1N < kMinTextPixels) uInfra = false;
+                if (ts[sIdx][0].t1N < kMinTextPixels) ++uTextShort;
                 if (ts[sIdx][0].bg == ts[sIdx][1].bg && ts[sIdx][0].t1 == ts[sIdx][1].t1 &&
                     ts[sIdx][0].t2 == ts[sIdx][1].t2)
                     ++agree;
             }
             if (std::strcmp(tc.name, "classic") == 0 &&
                 ts[0][0].bg != (on ? exp3dFace : classicOffFace))
-                uInfra = false;
+                ++uEquivFail;
             std::printf("buttontext: %s/%s m=%d/4", tc.name, on ? "on" : "off", agree);
             for (int sIdx = 0; sIdx < 4; ++sIdx) {
                 const TextStats& t = ts[sIdx][0];
@@ -1587,12 +1610,16 @@ int main(int argc, char** argv) {
             std::printf("\n");
         }
         if (tc.optOut) {
-            if (FAILED(ApplyWindowTheme(tc.button, nullptr, nullptr))) uInfra = false;
+            if (FAILED(ApplyWindowTheme(tc.button, nullptr, nullptr))) ++uHrFail;
             Pump(100);
         }
     }
     cfp::Publish(cfp::Mode::ForceDark, {});
-    std::printf("buttontext: infrastructure %s\n", uInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
+    if (uMagentaFail || uHrFail || uTextShort || uEquivFail) uInfra = false;
+    std::printf("buttontext: infrastructure magenta-fail=%ld hr-fail=%ld text-short=%ld"
+                " classic-equiv-fail=%ld %s\n",
+                uMagentaFail, uHrFail, uTextShort, uEquivFail,
+                uInfra ? "VALID" : "INFRASTRUCTURE_FAILURE");
 
     // ------------------------------------------------------------ report
     bool infraOk = true, behaviorOk = true;
