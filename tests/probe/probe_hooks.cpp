@@ -1923,8 +1923,48 @@ int main(int argc, char** argv) {
     // Measurement only. Candidate (c) bypasses mapping only for the innermost
     // known single-class Button DrawThemeText context with part 1.
     std::printf("\n[button text 9f] Button part-1 scoped bypass\n");
-    bool text9fInfra = true, text9fGate = true;
+    bool text9fInfra = true, text9fScoped = true, text9fPixels = true;
     const LONG text9fOverflow0 = uxo::g_textContextOverflow;
+
+    // Synthetic decision-table autotest. This directly proves fail-closed
+    // behavior for an unknown HTHEME and no-context, and part scoping for a
+    // known Button handle, without depending on what USER32 happens to open.
+    bool text9fDecision = true;
+    {
+        constexpr HTHEME known = reinterpret_cast<HTHEME>(static_cast<UINT_PTR>(0x9F01));
+        constexpr HTHEME unknown = reinterpret_cast<HTHEME>(static_cast<UINT_PTR>(0x9F02));
+        uxo::RecordTheme(known, L"Button");
+        const HWND savedPainting = bfo::t_painting;
+        const int savedDepth = uxo::t_drawThemeTextDepth;
+        const uxo::TextContext savedCtx = uxo::t_textContext[0];
+        bfo::t_painting = uButton;
+        g_textCausalTarget = uButton;
+        g_textPartBypass.store(true);
+
+        auto decision = [&](HTHEME theme, int part, int depth, COLORREF expected,
+                            long unknownN, long nonpartN, long interventionsN) {
+            g_textPartUnknown.store(0); g_textPartWrong.store(0);
+            g_textPartInterventions.store(0);
+            uxo::t_drawThemeTextDepth = depth;
+            if (depth) uxo::t_textContext[0] = {theme, part};
+            const COLORREF got = TextPartTap(nullptr, RGB(0,0,0), RGB(0xDC,0xDC,0xDC));
+            return got == expected && g_textPartUnknown.load() == unknownN &&
+                   g_textPartWrong.load() == nonpartN &&
+                   g_textPartInterventions.load() == interventionsN;
+        };
+        text9fDecision &= decision(unknown, 1, 1, RGB(0xDC,0xDC,0xDC), 1, 0, 0);
+        text9fDecision &= decision(known, 3, 1, RGB(0xDC,0xDC,0xDC), 0, 1, 0);
+        text9fDecision &= decision(known, 1, 1, RGB(0,0,0), 0, 0, 1);
+        text9fDecision &= decision(nullptr, 0, 0, RGB(0xDC,0xDC,0xDC), 0, 0, 0);
+        g_textPartBypass.store(false);
+        g_textCausalTarget = nullptr;
+        bfo::t_painting = savedPainting;
+        uxo::t_drawThemeTextDepth = savedDepth;
+        uxo::t_textContext[0] = savedCtx;
+        uxo::ForgetTheme(known);
+    }
+    if (!text9fDecision) text9fInfra = false;
+    std::printf("buttontext: 9f decision-table %s\n", text9fDecision ? "PASS" : "INFRASTRUCTURE_FAILURE");
     auto run9f = [&](const char* name, HWND h, const RECT& rect, int state) {
         if (!h) { text9fInfra = false; return; }
         uApplyState(h, state, true);
@@ -1962,26 +2002,36 @@ int main(int argc, char** argv) {
         Pump(50);
 
         if (!uSentinelOk(control) || !uSentinelOk(experiment)) text9fInfra = false;
-        long changed = 0, exact = 0, other = 0;
-        for (int y = rect.top; y < rect.bottom; ++y)
-            for (int x = rect.left; x < rect.right; ++x) {
-                const COLORREF ca = At(control.mode[0], x, y);
-                const COLORREF cb = At(experiment.mode[0], x, y);
-                if (ca == cb) continue;
-                ++changed;
-                if (ca == RGB(0xDC,0xDC,0xDC) && cb == RGB(0,0,0)) ++exact;
-                else ++other;
-            }
+        long changed[2]{}, exact[2]{}, other[2]{};
+        for (int m = 0; m < 2; ++m)
+            for (int y = rect.top; y < rect.bottom; ++y)
+                for (int x = rect.left; x < rect.right; ++x) {
+                    const COLORREF ca = At(control.mode[m], x, y);
+                    const COLORREF cb = At(experiment.mode[m], x, y);
+                    if (ca == cb) continue;
+                    ++changed[m];
+                    if (ca == RGB(0xDC,0xDC,0xDC) && cb == RGB(0,0,0)) ++exact[m];
+                    else ++other[m];
+                }
         const bool push = h == uButton;
-        const bool pixels = push ? changed == 582 && exact == 582 && other == 0 : changed == 0;
+        bool pixels = true;
+        for (int m = 0; m < 2; ++m) {
+            const TextStats cs = MeasureText(control.mode[m], rect);
+            const bool mappedGlyph = push && cs.t1 == RGB(0xDC,0xDC,0xDC) && cs.t1N == 582;
+            const bool modePixels = mappedGlyph
+                ? changed[m] == 582 && exact[m] == 582 && other[m] == 0
+                : changed[m] == 0 && other[m] == 0;
+            pixels &= modePixels;
+        }
         const bool scoped = interventions == 0 || (push && experimentWrong == 0);
-        const bool unknownSafe = experimentUnknown >= 0;  // unknown contexts always return mapped in TextPartTap
-        if (!pixels || !scoped || !unknownSafe) text9fGate = false;
+        if (!pixels) text9fPixels = false;
+        if (!scoped) text9fScoped = false;
         std::printf("buttontext: 9f %s calls=%ld/%ld interventions=%ld unknown=%ld/%ld nonpart=%ld/%ld"
-                    " changed=%ld dc-black=%ld other=%ld %s\n",
+                    " m0=%ld/%ld/%ld m1=%ld/%ld/%ld %s\n",
                     name, controlCalls, experimentCalls, interventions,
                     controlUnknown, experimentUnknown, controlWrong, experimentWrong,
-                    changed, exact, other, pixels && scoped ? "PASS" : "FAIL");
+                    changed[0], exact[0], other[0], changed[1], exact[1], other[1],
+                    pixels && scoped ? "PASS" : "FAIL");
     };
 
     run9f("push-normal", uButton, kUButton, 0);
@@ -2022,11 +2072,11 @@ int main(int argc, char** argv) {
     const LONG text9fOverflow = uxo::g_textContextOverflow - text9fOverflow0;
     if (text9fOverflow != 0) text9fInfra = false;
     std::printf("buttontext: 9f overflow=%ld\n", text9fOverflow);
-    std::printf("buttontext: 9f gate scoped=%s pixels=%s overflow=%s %s\n",
-                text9fGate ? "PASS" : "FAIL", text9fGate ? "PASS" : "FAIL",
-                text9fOverflow == 0 ? "PASS" : "FAIL",
-                text9fInfra && text9fGate ? "VALID" : "INFRASTRUCTURE_FAILURE");
-    if (!text9fGate) text9fInfra = false;
+    const bool text9fGate = text9fScoped && text9fPixels && text9fDecision;
+    std::printf("buttontext: 9f gate scoped=%s pixels=%s decision=%s overflow=%s %s\n",
+                text9fScoped ? "PASS" : "FAIL", text9fPixels ? "PASS" : "FAIL",
+                text9fDecision ? "PASS" : "FAIL", text9fOverflow == 0 ? "PASS" : "FAIL",
+                text9fInfra ? (text9fGate ? "PASS" : "BEHAVIOR_FAILURE") : "INFRASTRUCTURE_FAILURE");
 
     ShowWindow(winU, SW_HIDE);  // never occludes the later captures of E/K/C/L
     Pump(100);
@@ -2044,6 +2094,7 @@ int main(int argc, char** argv) {
     if (!text9dInfra) infraOk = false;  // 9d measurement infrastructure
     if (!text9eInfra) infraOk = false;  // 9e measurement infrastructure
     if (!text9fInfra) infraOk = false;  // 9f measurement infrastructure
+    if (!text9fGate) behaviorOk = false;  // 9f candidate behavior
     if (!uBehavior) behaviorOk = false;  // 9c gates G1-G3
     if (!observerAutotest || !observerPassive) infraOk = false;
     if (!policyOk) behaviorOk = false;
