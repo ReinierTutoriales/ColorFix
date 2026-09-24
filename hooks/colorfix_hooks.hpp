@@ -40,7 +40,9 @@ inline std::atomic<long> g_probeCalls[static_cast<int>(HookId::Count)];
 // 9a/9b button-face observer uses it instead of a second MinHook detour on
 // user32!FillRect, which the product hook already owns.
 using FillRectTap_t = HBRUSH (*)(HDC, const RECT*, HBRUSH);
+using SetTextColorTap_t = COLORREF (*)(HDC, COLORREF, COLORREF);
 inline std::atomic<FillRectTap_t> g_probeFillRectTap{nullptr};
+inline std::atomic<SetTextColorTap_t> g_probeSetTextColorTap{nullptr};
 inline std::atomic<long> g_fillRectSubstituted{0};   // product substitutions
 inline std::atomic<long> g_fillRectPseudo{0};        // COLOR_x + 1 values seen
 inline std::atomic<unsigned long> g_fillRectPseudoMask{0};  // bit x = COLOR_x
@@ -148,7 +150,12 @@ inline HGDIOBJ WINAPI GetStockObject_Hook(int object) {
 inline COLORREF WINAPI SetTextColor_Hook(HDC dc, COLORREF color) {
     COLORFIX_PROBE_HIT(SetTextColor);
     if (!colorfix::policy::Active()) return SetTextColor_Original(dc, color);
-    return SetTextColor_Original(dc, colorfix::MapLiteralColor(color));
+    COLORREF mapped = colorfix::MapLiteralColor(color);
+#if defined(COLORFIX_PROBE)
+    if (const SetTextColorTap_t tap = g_probeSetTextColorTap.load(std::memory_order_acquire))
+        mapped = tap(dc, color, mapped);
+#endif
+    return SetTextColor_Original(dc, mapped);
 }
 
 inline COLORREF WINAPI SetBkColor_Hook(HDC dc, COLORREF color) {
