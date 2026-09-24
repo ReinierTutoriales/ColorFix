@@ -63,7 +63,7 @@ jobs:
             Add-Content $env:GITHUB_STEP_SUMMARY '```'
             # Annotations are truncated at about 4 KB: verdict first, then groups.
             $groups = [ordered]@{
-              'result'    = '^(arch|order|summary|policy|runtime):'
+              'result'    = '^(arch|order|summary|policy|runtime|buttonface):'
               'autotests' = '^(threshold|expect|autotest|detail):'
               'surfaces'  = '^(surface|scenario):'
               'v6'        = '^(comctl32|v6|v6scenario):'

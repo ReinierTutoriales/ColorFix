@@ -30,6 +30,7 @@
 #include "colorfix_hooks.hpp"
 #include "colorfix_runtime.hpp"
 #include "uxtheme_observer.hpp"
+#include "button_face_observer.hpp"
 
 #ifndef PW_RENDERFULLCONTENT
 #define PW_RENDERFULLCONTENT 0x00000002
@@ -560,7 +561,7 @@ int main(int argc, char** argv) {
         }
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    std::printf("ColorFixProbe increment 8 - runtime policy wiring\n");
+    std::printf("ColorFixProbe increment 9a - button face causal characterization\n");
 #if defined(_M_ARM64)
     std::printf("arch: ARM64\n");
 #elif defined(_M_X64) || defined(__x86_64__)
@@ -972,9 +973,169 @@ int main(int argc, char** argv) {
     }
     cfp::Publish(cfp::Mode::ForceDark, {});
 
+    // ------------------------------------------ Phase 9a: button face causality
+    // Policy ON, product hooks live. Candidates are intervened one at a time,
+    // only in the target button's paint; causality is control vs experiment of
+    // the same state, never the mapped color. Verdicts are findings; only
+    // infrastructure (install, autotests, captures, magenta, restoration,
+    // product hooks afterwards) can fail the run.
+    namespace bfo = colorfix::probe::button_face;
+    std::printf("\n[button face 9a] causal characterization, policy ON\n");
+    bool bfInfra = true;
+    InterlockedExchange(&uxo::g_paused, 1);
+    bfo::g_setBkColorRaw = cfh::SetBkColor_Original;
+    bfo::g_createBrushRaw = cfh::CreateSolidBrush_Original;
+    const bool bfInstalled = bfo::Install();
+    if (!bfInstalled) bfInfra = false;
+    uxo::g_drawIntercept = &bfo::DrawThemeIntercept;
+    bool bfCandidateOk[bfo::kCandidates] = {};
+    for (int c = 0; bfInstalled && c < bfo::kCandidates; ++c) {
+        const bfo::AutotestResult at = bfo::Autotest(c);
+        bfCandidateOk[c] = at.ok;
+        if (!at.ok) bfInfra = false;
+        std::printf("autotest: bf.%-19s calls=%ld control=", bfo::kName[c], at.calls);
+        PrintRgb(at.control);
+        std::printf(" experiment=");
+        PrintRgb(at.experiment);
+        std::printf(" %s\n", at.ok ? "PASS" : "INFRASTRUCTURE_FAILURE");
+    }
+
+    struct BfTarget { const char* name; HWND parent; HWND button; RECT face; };
+    const BfTarget bfTargets[] = {
+        {"C",     winC, GetDlgItem(winC, kButtonId), {218, 18, 292, 82}},
+        {"T-off", winT, GetDlgItem(winT, kButtonId), {218, 18, 288, 78}},
+        {"V",     winV, GetDlgItem(winV, kButtonId), {218, 18, 292, 82}},
+    };
+    for (const auto& t : bfTargets)
+        if (!bfo::Subclass(t.button)) bfInfra = false;
+
+    // T is characterized opted out; it must return to its own themed capture.
+    const WindowShot preT9 = Shoot(winT);
+    if (FAILED(ApplyWindowThemeToT(winT, L"", L""))) bfInfra = false;
+    Pump(100);
+
+    auto bfMagentaOk = [](const WindowShot& s) {
+        for (int m = 0; m < 2; ++m) {
+            COLORREF c = CLR_INVALID;
+            if (s.mode[m].px.empty() || !SurfaceColor(s.mode[m], kMagentaRect, &c) ||
+                c != kMagenta)
+                return false;
+        }
+        return true;
+    };
+    auto bfShoot = [&](const BfTarget& t) {
+        RedrawWindow(t.button, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_UPDATENOW);
+        WindowShot s = Shoot(t.parent);
+        if (!bfMagentaOk(s)) bfInfra = false;
+        return s;
+    };
+    auto bfApplyState = [](HWND b, int state, bool on) {
+        switch (state) {
+        case 1: SendMessageW(b, BM_SETSTATE, on ? TRUE : FALSE, 0); break;
+        case 2: EnableWindow(b, on ? FALSE : TRUE); break;
+        case 3: SendMessageW(b, BM_SETSTYLE, on ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON, TRUE); break;
+        default: break;
+        }
+    };
+    const char* const bfStates[4] = {"NORMAL", "PRESSED", "DISABLED", "DEFAULTED"};
+    std::printf("buttonface: legend M=CAUSAL_MARKER D=CAUSAL_DIFFERENCE n=NON_CAUSAL "
+                "-=NOT_OBSERVED X=INFRASTRUCTURE; two codes = flags0,full\n");
+    std::printf("buttonface: HOVER EXCLUDED_NONDETERMINISTIC\n");
+    for (const auto& t : bfTargets) {
+        long bfAtt[bfo::kCandidates] = {}, bfDc[bfo::kCandidates] = {};
+        const int cx = (t.face.left + t.face.right) / 2, cy = (t.face.top + t.face.bottom) / 2;
+        for (int s = 0; s < 4; ++s) {
+            bfApplyState(t.button, s, true);
+            Pump(50);
+            const WindowShot control = bfShoot(t);
+            char codes[bfo::kCandidates][3] = {};
+            for (int c = 0; c < bfo::kCandidates; ++c) {
+                codes[c][0] = codes[c][1] = 'X';
+                if (!bfCandidateOk[c]) continue;
+                const long att0 = bfo::g_attributed[c].load();
+                const long dc0 = bfo::g_dcMatch[c].load();
+                bfo::g_target.store(t.button);
+                bfo::g_active.store(c);
+                const WindowShot exp = bfShoot(t);
+                bfo::g_active.store(-1);
+                bfo::g_target.store(nullptr);
+                const long att = bfo::g_attributed[c].load() - att0;
+                bfAtt[c] += att;
+                bfDc[c] += bfo::g_dcMatch[c].load() - dc0;
+                for (int m = 0; m < 2; ++m) {
+                    const Capture& a = control.mode[m];
+                    const Capture& b = exp.mode[m];
+                    if (a.px.empty() || b.px.empty()) continue;
+                    if (att == 0) { codes[c][m] = '-'; continue; }
+                    long diff = 0, total = 0;
+                    for (int y = t.face.top; y < t.face.bottom; ++y)
+                        for (int x = t.face.left; x < t.face.right; ++x) {
+                            ++total;
+                            if (At(a, x, y) != At(b, x, y)) ++diff;
+                        }
+                    const COLORREF ca = At(a, cx, cy), cb = At(b, cx, cy);
+                    if (bfo::kSubstitutes[c])
+                        codes[c][m] = (cb == bfo::kMarker && ca != bfo::kMarker) ? 'M' : 'n';
+                    else  // the difference must replace the face, not just its border
+                        codes[c][m] = (ca != cb && diff * 2 >= total) ? 'D' : 'n';
+                }
+            }
+            bfApplyState(t.button, s, false);
+            Pump(50);
+            std::printf("buttonface: %s/%-9s face=", t.name, bfStates[s]);
+            PrintRgb(control.mode[0].px.empty() ? CLR_INVALID : At(control.mode[0], cx, cy));
+            for (int c = 0; c < bfo::kCandidates; ++c)
+                std::printf(" %s=%s", bfo::kShort[c], codes[c]);
+            std::printf("\n");
+        }
+        // Independent evidence: calls in the target's paint whose DC is the
+        // button's own window DC (a memory DC gives 0).
+        std::printf("buttonface: %s windowfromdc", t.name);
+        for (int c = 0; c < bfo::kCandidates; ++c)
+            std::printf(" %s=%ld/%ld", bfo::kShort[c], bfDc[c], bfAtt[c]);
+        std::printf("\n");
+    }
+
+    for (const auto& t : bfTargets) bfo::Unsubclass(t.button);
+    uxo::g_drawIntercept = nullptr;
+    bfo::Uninstall();
+    InterlockedExchange(&uxo::g_paused, 0);
+
+    // Restoration: T back to its themed capture; C and V back to the hooked
+    // captures of the coverage phase.
+    if (FAILED(ApplyWindowThemeToT(winT, nullptr, nullptr))) bfInfra = false;
+    Pump(100);
+    const WindowShot postT9 = Shoot(winT);
+    const WindowShot postC9 = Shoot(winC);
+    const WindowShot postV9 = Shoot(winV);
+    bool bfRestored = true;
+    const RECT bfTRects[3] = {{18, 18, 88, 78}, {118, 18, 188, 78}, {218, 18, 288, 78}};
+    const RECT bfFace{218, 18, 292, 82};
+    for (int m = 0; m < 2; ++m) {
+        for (const RECT& r : bfTRects)
+            if (!RegionEqual(preT9.mode[m], postT9.mode[m], r)) bfRestored = false;
+        if (!RegionEqual(hookC.mode[m], postC9.mode[m], bfFace)) bfRestored = false;
+        if (!RegionEqual(hookV.mode[m], postV9.mode[m], bfFace)) bfRestored = false;
+    }
+    if (!bfRestored) bfInfra = false;
+    std::printf("buttonface: restored T/C/V %s\n", bfRestored ? "SAME" : "INFRASTRUCTURE_FAILURE");
+
+    // Product hooks must still intercept after the 9a detours were removed.
+    const long bfGs0 = cfh::g_probeCalls[static_cast<int>(HookId::GetSysColor)].load();
+    const COLORREF bfLive = GetSysColor(COLOR_WINDOW);
+    const bool bfProductLive =
+        bfLive == expWindow &&
+        cfh::g_probeCalls[static_cast<int>(HookId::GetSysColor)].load() > bfGs0;
+    if (!bfProductLive) bfInfra = false;
+    std::printf("buttonface: product-hooks-after GetSysColor=");
+    PrintRgb(bfLive);
+    std::printf(" %s\n", bfProductLive ? "LIVE" : "INFRASTRUCTURE_FAILURE");
+
     // ------------------------------------------------------------ report
     bool infraOk = true, behaviorOk = true;
     if (!ctlOk) infraOk = false;  // DeleteObject.pass has no valid control
+    if (!bfInfra) infraOk = false;  // 9a infrastructure
     if (!observerAutotest || !observerPassive) infraOk = false;
     if (!policyOk) behaviorOk = false;
 
